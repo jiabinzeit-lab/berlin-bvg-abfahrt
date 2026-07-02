@@ -1,0 +1,19 @@
+{
+  "name": "柏林公交看板",
+  "short_name": "公交看板",
+  "description": "查看柏林公交、电车、S/U-Bahn 的实时到站倒计时",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#0b0e14",
+  "theme_color": "#0b0e14",
+  "orientation": "portrait",
+  "lang": "zh-CN",
+  "icons": [
+    {
+      "src": "./icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

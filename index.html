@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
+  <meta name="theme-color" content="#0b0e14" />
+  <title>柏林公交看板</title>
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <link rel="icon" href="./icons/icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="./icons/icon.svg" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="公交看板" />
+  <link rel="stylesheet" href="./css/styles.css" />
+</head>
+<body>
+  <header id="header" class="header"></header>
+  <main id="app" class="content"></main>
+  <nav id="bottomnav" class="bottomnav">
+    <button class="nav-btn active" data-tab="nearby">
+      <span class="nav-ico">📍</span><span>附近</span>
+    </button>
+    <button class="nav-btn" data-tab="search">
+      <span class="nav-ico">🔍</span><span>搜索</span>
+    </button>
+    <button class="nav-btn" data-tab="favorites">
+      <span class="nav-ico">★</span><span>收藏</span>
+    </button>
+  </nav>
+  <script type="module" src="./js/app.js"></script>
+</body>
+</html>
