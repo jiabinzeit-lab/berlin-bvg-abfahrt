@@ -1,5 +1,11 @@
 import { nearbyStops, searchStops, departures } from './api.js';
-import { getFavorites, isFavorite, toggleFavorite, setFavoriteLine } from './store.js';
+import {
+  getFavorites,
+  isFavorite,
+  toggleFavorite,
+  getCachedDepartures,
+  setCachedDepartures,
+} from './store.js';
 
 // ---------- 工具函数 ----------
 
@@ -75,11 +81,14 @@ function updateNav() {
   document.getElementById('bottomnav').style.display = state.currentStop ? 'none' : 'flex';
 }
 
-function stopRow(stop, extra = '') {
-  const dist = stop.distance != null ? `<span class="dist">${stop.distance} m</span>` : '';
-  return `<button class="stop-row" data-stop-id="${esc(stop.id)}" data-stop-name="${esc(stop.name)}">
+function stopRow(stop, { line = null, product = null, dist = true } = {}) {
+  const distHtml = dist && stop.distance != null ? `<span class="dist">${stop.distance} m</span>` : '';
+  const lineHtml = line
+    ? `<span class="line-badge sm ${productInfo(product).cls}">${esc(line)}</span>`
+    : '';
+  return `<button class="stop-row" data-stop-id="${esc(stop.id)}" data-stop-name="${esc(stop.name)}" data-line="${esc(line || '')}">
     <span class="stop-name">${esc(cleanName(stop.name))}</span>
-    ${dist}${extra}
+    ${distHtml}${lineHtml}
     <span class="chev">›</span>
   </button>`;
 }
@@ -152,19 +161,21 @@ function renderFavorites() {
   setHeader('收藏');
   const favs = getFavorites();
   if (!favs.length) {
-    app.innerHTML = emptyState('还没有收藏站点。<br>进入任意站点后点右上角 ☆ 即可收藏。');
+    app.innerHTML = emptyState(
+      '还没有收藏。<br>进入站点后点右上角 ☆ 收藏整站;<br>先选一条线路再点 ☆,即可收藏「站点+该线路」。'
+    );
     return;
   }
   app.innerHTML = `<div class="list">${favs
-    .map((s) => stopRow(s, s.line ? `<span class="fav-line">只看 ${esc(s.line)}</span>` : ''))
+    .map((f) => stopRow(f, { line: f.line, product: f.product, dist: false }))
     .join('')}</div>`;
-  bindStopRows(true);
+  bindStopRows();
 }
 
 // ---- 站点发车详情 ----
 function renderDeparturesView() {
   const stop = state.currentStop;
-  const fav = isFavorite(stop.id);
+  const fav = isFavorite(stop.id, state.lineFilter);
   setHeader(cleanName(stop.name), true, fav);
   app.innerHTML = `
     <div id="filter-bar" class="filter-bar"></div>
@@ -174,16 +185,38 @@ function renderDeparturesView() {
 
 async function loadDepartures() {
   const stop = state.currentStop;
+  if (!stop) return;
+
+  // 秒开:若本地有缓存,先立即渲染(倒计时按绝对时间算,缓存也准),再后台刷新
+  if (!state.deps.length) {
+    const cached = getCachedDepartures(stop.id);
+    if (cached && cached.length) {
+      state.deps = cached;
+      paintDepartures();
+    }
+  }
+
+  const refreshBtn = document.getElementById('refresh-btn');
+  if (refreshBtn) refreshBtn.classList.add('spin');
+
   try {
     const deps = await departures(stop.id);
+    if (!state.currentStop || state.currentStop.id !== stop.id) return; // 用户已离开该站
     state.deps = deps;
+    setCachedDepartures(stop.id, deps);
     paintDepartures();
-    scheduleRefresh();
   } catch (err) {
-    document.getElementById('dep-list').innerHTML = errorState(
-      '获取发车信息失败:' + (err.message || ''),
-      loadDepartures
-    );
+    if (!state.currentStop || state.currentStop.id !== stop.id) return;
+    // 只有在完全没有可显示数据时才报错;有缓存则继续显示、静默重试
+    if (!state.deps.length) {
+      document.getElementById('dep-list').innerHTML = errorState(
+        '获取发车信息失败:' + (err.message || ''),
+        loadDepartures
+      );
+    }
+  } finally {
+    if (refreshBtn) refreshBtn.classList.remove('spin');
+    if (state.currentStop && state.currentStop.id === stop.id) scheduleRefresh();
   }
 }
 
@@ -203,10 +236,7 @@ function paintDepartures() {
     filterBar.querySelectorAll('.chip').forEach((c) => {
       c.onclick = () => {
         state.lineFilter = c.dataset.line || null;
-        // 若已收藏,记住该站默认只看的线路
-        if (isFavorite(state.currentStop.id)) {
-          setFavoriteLine(state.currentStop.id, state.lineFilter);
-        }
+        updateFavButton(); // 收藏是「站点+线路」组合,切换线路后星标要同步
         paintDepartures();
       };
     });
@@ -214,7 +244,13 @@ function paintDepartures() {
     filterBar.innerHTML = '';
   }
 
-  let rows = state.deps;
+  updateFavButton();
+
+  // 丢弃已过站的车次(尤其来自缓存的),只保留即将到站/未知时间的
+  let rows = state.deps.filter((d) => {
+    const m = minutesUntil(d.when);
+    return m === null || m >= 0;
+  });
   if (state.lineFilter) rows = rows.filter((d) => d.line && d.line.name === state.lineFilter);
 
   if (!rows.length) {
@@ -289,13 +325,22 @@ function setHeader(title, back = false, fav = false) {
   const favBtn = document.getElementById('fav-btn');
   if (favBtn)
     favBtn.onclick = () => {
+      // 找到当前线路的交通方式,收藏后徽章可显示对应配色
+      let product = null;
+      if (state.lineFilter) {
+        const d = state.deps.find((x) => x.line && x.line.name === state.lineFilter);
+        product = d && d.line ? d.line.product : null;
+      }
       const nowFav = toggleFavorite({
         id: state.currentStop.id,
         name: state.currentStop.name,
         line: state.lineFilter,
+        product,
       });
       favBtn.textContent = nowFav ? '★' : '☆';
       favBtn.classList.toggle('faved', nowFav);
+      const target = state.lineFilter ? state.lineFilter + ' 线' : '整站';
+      toast(nowFav ? `已收藏(${target})` : `已取消收藏(${target})`);
     };
   const refreshBtn = document.getElementById('refresh-btn');
   if (refreshBtn)
@@ -306,22 +351,41 @@ function setHeader(title, back = false, fav = false) {
 }
 
 // ---------- 交互绑定 ----------
-function bindStopRows(fromFav = false) {
+function bindStopRows() {
   document.querySelectorAll('.stop-row').forEach((row) => {
     row.onclick = () => {
-      const id = row.dataset.stopId;
-      const name = row.dataset.stopName;
-      // 若从收藏进入且该收藏记住了默认线路,自动应用过滤
-      state.lineFilter = null;
-      if (fromFav) {
-        const fav = getFavorites().find((s) => s.id === id);
-        if (fav && fav.line) state.lineFilter = fav.line;
-      }
-      state.currentStop = { id, name };
+      // 收藏行带 data-line 时自动应用该线路过滤;附近/搜索行无 line
+      state.lineFilter = row.dataset.line || null;
+      state.currentStop = { id: row.dataset.stopId, name: row.dataset.stopName };
       state.deps = [];
       render();
     };
   });
+}
+
+// 同步头部收藏星标为「当前站点 + 当前线路」组合的状态
+function updateFavButton() {
+  const btn = document.getElementById('fav-btn');
+  if (!btn || !state.currentStop) return;
+  const f = isFavorite(state.currentStop.id, state.lineFilter);
+  btn.textContent = f ? '★' : '☆';
+  btn.classList.toggle('faved', f);
+}
+
+// 轻提示
+let toastTimer;
+function toast(msg) {
+  let el = document.getElementById('toast');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'toast';
+    el.className = 'toast';
+    document.body.appendChild(el);
+  }
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), 1800);
 }
 
 // ---------- 定位 ----------

@@ -1,46 +1,72 @@
-// 收藏站点的本地存储(localStorage)。
-const KEY = 'bvg.favorites.v1';
+// 本地存储:收藏(站点 + 可选线路)与发车缓存。
+const FAV_KEY = 'bvg.favorites.v1';
+const DEP_KEY = 'bvg.depcache.v1';
 
-function read() {
+function read(key) {
   try {
-    return JSON.parse(localStorage.getItem(KEY)) || [];
+    return JSON.parse(localStorage.getItem(key));
   } catch {
-    return [];
+    return null;
   }
 }
-
-function write(list) {
-  localStorage.setItem(KEY, JSON.stringify(list));
+function write(key, val) {
+  localStorage.setItem(key, JSON.stringify(val));
 }
 
+// ---------- 收藏 ----------
+// 每条收藏 = { id, name, line|null, product|null }
+// line 为 null 表示收藏整站;否则表示「该站的某条线路」。
 export function getFavorites() {
-  return read();
+  return read(FAV_KEY) || [];
 }
 
-export function isFavorite(id) {
-  return read().some((s) => s.id === id);
+function sameFav(f, id, line) {
+  return f.id === id && (f.line || null) === (line || null);
 }
 
-// 收藏时可附带默认过滤的线路(用于「只看某条线路」)
-export function toggleFavorite(stop) {
-  const list = read();
-  const idx = list.findIndex((s) => s.id === stop.id);
+export function isFavorite(id, line = null) {
+  return getFavorites().some((f) => sameFav(f, id, line));
+}
+
+// 收藏 / 取消收藏(按 站点+线路 组合),返回收藏后的状态
+export function toggleFavorite({ id, name, line = null, product = null }) {
+  const list = getFavorites();
+  const idx = list.findIndex((f) => sameFav(f, id, line));
   if (idx >= 0) {
     list.splice(idx, 1);
-    write(list);
+    write(FAV_KEY, list);
     return false;
   }
-  list.push({ id: stop.id, name: stop.name, line: stop.line || null });
-  write(list);
+  list.push({ id, name, line: line || null, product: product || null });
+  write(FAV_KEY, list);
   return true;
 }
 
-// 记住某个收藏站点默认只看哪条线路
-export function setFavoriteLine(id, line) {
-  const list = read();
-  const s = list.find((x) => x.id === id);
-  if (s) {
-    s.line = line;
-    write(list);
+export function removeFavorite(id, line = null) {
+  write(
+    FAV_KEY,
+    getFavorites().filter((f) => !sameFav(f, id, line))
+  );
+}
+
+// ---------- 发车缓存(用于秒开) ----------
+// 按站点 id 缓存最近一次发车数据。倒计时基于绝对时间计算,缓存数据也能正确倒计时。
+export function getCachedDepartures(id) {
+  const all = read(DEP_KEY) || {};
+  return all[id] ? all[id].deps : null;
+}
+
+export function setCachedDepartures(id, deps) {
+  const all = read(DEP_KEY) || {};
+  all[id] = { ts: Date.now(), deps };
+  // 限制缓存条目数,淘汰最旧的
+  const ids = Object.keys(all);
+  if (ids.length > 30) {
+    ids
+      .map((k) => [k, all[k].ts])
+      .sort((a, b) => a[1] - b[1])
+      .slice(0, ids.length - 30)
+      .forEach(([k]) => delete all[k]);
   }
+  write(DEP_KEY, all);
 }
