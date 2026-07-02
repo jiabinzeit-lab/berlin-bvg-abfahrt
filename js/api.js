@@ -55,14 +55,17 @@ export function searchStops(query, results = 10) {
   return fetchJSON('/locations?' + q.toString());
 }
 
-// 某站的实时发车列表
-export async function departures(stopId, { duration = 40, results = 30 } = {}) {
-  const q = new URLSearchParams({
-    duration,
-    results,
-    remarks: 'false',
-    language: 'en',
-  });
+// VBB 交通方式(用于按类型过滤,减小返回体积)
+const ALL_PRODUCTS = ['suburban', 'subway', 'tram', 'bus', 'ferry', 'express', 'regional'];
+
+// 某站的实时发车列表。products 传入允许的类型数组(如 ['subway','bus'])时,
+// 只请求这些类型,payload 更小、更快。
+export async function departures(stopId, { duration = 40, results = 30, products = null } = {}) {
+  const params = { duration, results, remarks: 'false', language: 'en' };
+  if (products && products.length) {
+    for (const p of ALL_PRODUCTS) params[p] = products.includes(p) ? 'true' : 'false';
+  }
+  const q = new URLSearchParams(params);
   const data = await fetchJSON('/stops/' + encodeURIComponent(stopId) + '/departures?' + q.toString());
   // v6 返回 { departures: [...] }
   return Array.isArray(data) ? data : data.departures || [];

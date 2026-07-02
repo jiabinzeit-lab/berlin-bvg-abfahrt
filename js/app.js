@@ -1,11 +1,34 @@
-import { nearbyStops, searchStops, departures } from './api.js';
+import { searchStops, departures } from './api.js';
 import {
   getFavorites,
   isFavorite,
   toggleFavorite,
   getCachedDepartures,
   setCachedDepartures,
+  getPinnedStop,
+  setPinnedStop,
 } from './store.js';
+
+// ---------- 「附近」栏固定盯的站点与线路 ----------
+const PINNED = {
+  query: 'Breitenbachplatz', // 用于首次解析站点 ID
+  name: 'U Breitenbachplatz',
+  lines: ['282', '101', '248', 'U3', '186'], // 只看这几路
+};
+
+// 格式化为柏林当地时间 HH:MM
+function berlinTime(whenIso) {
+  if (!whenIso) return '';
+  try {
+    return new Date(whenIso).toLocaleTimeString('de-DE', {
+      timeZone: 'Europe/Berlin',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  } catch {
+    return '';
+  }
+}
 
 // ---------- 工具函数 ----------
 
@@ -49,10 +72,11 @@ function esc(s) {
 
 // ---------- 应用状态 ----------
 const state = {
-  tab: 'nearby', // nearby | search | favorites
+  tab: 'nearby', // nearby(固定站点) | search | favorites
   currentStop: null, // { id, name }
   deps: [], // 当前站点的发车数据
   lineFilter: null, // 只看某条线路时的线路名
+  pinnedDeps: [], // 固定站点的发车数据
   refreshTimer: null,
   tickTimer: null,
 };
@@ -65,7 +89,7 @@ function render() {
   if (state.currentStop) {
     renderDeparturesView();
   } else if (state.tab === 'nearby') {
-    renderNearby();
+    renderPinned();
   } else if (state.tab === 'search') {
     renderSearch();
   } else {
@@ -93,28 +117,121 @@ function stopRow(stop, { line = null, product = null, dist = true } = {}) {
   </button>`;
 }
 
-// ---- 附近 ----
-async function renderNearby() {
-  setHeader('附近站点');
-  app.innerHTML = `<div class="loading">正在定位…</div>`;
+// ---- 附近:固定站点看板(U Breitenbachplatz,只看指定几路车)----
+function renderPinned() {
+  const h = document.getElementById('header');
+  h.innerHTML = `
+    <span class="hspace"></span>
+    <h1 class="htitle">${esc(PINNED.name)}</h1>
+    <button id="refresh-btn" class="hbtn">⟳</button>`;
+  document.getElementById('refresh-btn').onclick = () => {
+    const b = document.getElementById('refresh-btn');
+    b.classList.add('spin');
+    loadPinned().finally(() => setTimeout(() => b.classList.remove('spin'), 500));
+  };
+  app.innerHTML = `<div id="pin-list" class="dep-list"><div class="loading">加载中…</div></div>`;
+  loadPinned();
+}
+
+async function loadPinned() {
+  const listEl = document.getElementById('pin-list');
   try {
-    const pos = await getPosition();
-    app.innerHTML = `<div class="loading">正在查找附近站点…</div>`;
-    const stops = await nearbyStops(pos.latitude, pos.longitude);
-    if (!stops.length) {
-      app.innerHTML = emptyState('附近没有找到站点');
-      return;
+    // 解析并缓存站点 ID(仅首次需要联网,之后永久走缓存)
+    let stop = getPinnedStop(PINNED.query);
+    if (!stop) {
+      const results = await searchStops(PINNED.query);
+      stop =
+        results.find((s) => /Breitenbachplatz/i.test(s.name) && s.products && s.products.subway) ||
+        results.find((s) => /Breitenbachplatz/i.test(s.name)) ||
+        results[0];
+      if (!stop) throw new Error('未找到该站点');
+      setPinnedStop(PINNED.query, stop);
     }
-    app.innerHTML = `<div class="list">${stops.map((s) => stopRow(s)).join('')}</div>`;
-    bindStopRows();
+
+    // 秒开:先渲染缓存,再后台刷新
+    if (!state.pinnedDeps.length) {
+      const cached = getCachedDepartures(stop.id);
+      if (cached && cached.length) {
+        state.pinnedDeps = cached;
+        paintPinned();
+      }
+    }
+
+    const refreshBtn = document.getElementById('refresh-btn');
+    if (refreshBtn) refreshBtn.classList.add('spin');
+
+    // 只请求地铁 + 公交,payload 更小、更快
+    const deps = await departures(stop.id, { duration: 60, results: 40, products: ['subway', 'bus'] });
+    if (state.tab !== 'nearby' || state.currentStop) return; // 用户已离开该栏
+    state.pinnedDeps = deps;
+    setCachedDepartures(stop.id, deps);
+    paintPinned();
   } catch (err) {
-    app.innerHTML = errorState(
-      err.code === 1 || /denied/i.test(err.message || '')
-        ? '无法获取定位权限。请在浏览器/系统中允许定位,或改用「搜索」查站点。'
-        : '获取附近站点失败:' + (err.message || '未知错误'),
-      renderNearby
-    );
+    if (!state.pinnedDeps.length && listEl) {
+      listEl.innerHTML = errorState('加载失败:' + (err.message || ''), loadPinned);
+    }
+  } finally {
+    const refreshBtn = document.getElementById('refresh-btn');
+    if (refreshBtn) refreshBtn.classList.remove('spin');
+    if (state.tab === 'nearby' && !state.currentStop) schedulePinnedRefresh();
   }
+}
+
+function paintPinned() {
+  const listEl = document.getElementById('pin-list');
+  if (!listEl) return;
+  const allow = new Set(PINNED.lines);
+  const rows = state.pinnedDeps
+    .filter((d) => d.line && allow.has(d.line.name))
+    .filter((d) => {
+      const m = minutesUntil(d.when);
+      return m === null || m >= 0;
+    })
+    .sort((a, b) => new Date(a.when || 0) - new Date(b.when || 0));
+
+  if (!rows.length) {
+    listEl.innerHTML = emptyState('近期暂无这几路车(' + PINNED.lines.join('、') + ')的班次');
+    return;
+  }
+  listEl.innerHTML = rows.map(depRowHtml).join('');
+}
+
+function schedulePinnedRefresh() {
+  clearInterval(state.refreshTimer);
+  clearInterval(state.tickTimer);
+  state.refreshTimer = setInterval(loadPinned, 30000);
+  state.tickTimer = setInterval(() => {
+    if (state.tab === 'nearby' && !state.currentStop) paintPinned();
+  }, 10000);
+}
+
+// 单条发车行(倒计时 + 柏林当地到达时间),供固定看板与站点详情共用
+function depRowHtml(d) {
+  const p = productInfo(d.line && d.line.product);
+  const min = minutesUntil(d.when);
+  const delay = d.delay; // 秒
+  let delayTag = '';
+  if (delay != null && Math.abs(delay) >= 60) {
+    const m = Math.round(delay / 60);
+    delayTag = delay > 0 ? `<span class="delay late">晚 ${m} 分</span>` : `<span class="delay early">早 ${-m} 分</span>`;
+  } else if (delay != null) {
+    delayTag = `<span class="delay ontime">准点</span>`;
+  }
+  const cancelled = d.cancelled ? `<span class="delay late">已取消</span>` : '';
+  const time = berlinTime(d.when);
+  const cd = countdownText(min);
+  const urgent = min !== null && min <= 2 ? 'urgent' : '';
+  return `<div class="dep-row ${d.cancelled ? 'cancelled' : ''}">
+    <span class="line-badge ${p.cls}">${esc(d.line ? d.line.name : p.label)}</span>
+    <span class="dep-mid">
+      <span class="dep-dir">${esc(cleanName(d.direction) || '—')}</span>
+      <span class="dep-sub">${delayTag}${cancelled}</span>
+    </span>
+    <span class="dep-cd-wrap">
+      <span class="dep-cd ${urgent}">${esc(cd)}</span>
+      ${time ? `<span class="dep-time">${esc(time)} 到站</span>` : ''}
+    </span>
+  </div>`;
 }
 
 // ---- 搜索 ----
@@ -258,31 +375,7 @@ function paintDepartures() {
     return;
   }
 
-  listEl.innerHTML = rows
-    .map((d) => {
-      const p = productInfo(d.line && d.line.product);
-      const min = minutesUntil(d.when);
-      const delay = d.delay; // 秒
-      let delayTag = '';
-      if (delay != null && Math.abs(delay) >= 60) {
-        const m = Math.round(delay / 60);
-        delayTag = delay > 0 ? `<span class="delay late">晚 ${m} 分</span>` : `<span class="delay early">早 ${-m} 分</span>`;
-      } else if (delay != null) {
-        delayTag = `<span class="delay ontime">准点</span>`;
-      }
-      const cancelled = d.cancelled ? `<span class="delay late">已取消</span>` : '';
-      const cd = countdownText(min);
-      const urgent = min !== null && min <= 2 ? 'urgent' : '';
-      return `<div class="dep-row ${d.cancelled ? 'cancelled' : ''}">
-        <span class="line-badge ${p.cls}">${esc(d.line ? d.line.name : p.label)}</span>
-        <span class="dep-mid">
-          <span class="dep-dir">${esc(cleanName(d.direction) || '—')}</span>
-          <span class="dep-sub">${delayTag}${cancelled}</span>
-        </span>
-        <span class="dep-cd ${urgent}">${esc(cd)}</span>
-      </div>`;
-    })
-    .join('');
+  listEl.innerHTML = rows.map(depRowHtml).join('');
 }
 
 // 每 30s 重新拉取,每 10s 只刷新倒计时文本
@@ -388,21 +481,6 @@ function toast(msg) {
   toastTimer = setTimeout(() => el.classList.remove('show'), 1800);
 }
 
-// ---------- 定位 ----------
-function getPosition() {
-  return new Promise((resolve, reject) => {
-    if (!('geolocation' in navigator)) {
-      reject(new Error('设备不支持定位'));
-      return;
-    }
-    navigator.geolocation.getCurrentPosition(
-      (pos) => resolve({ latitude: pos.coords.latitude, longitude: pos.coords.longitude }),
-      (err) => reject(err),
-      { enableHighAccuracy: false, timeout: 10000, maximumAge: 60000 }
-    );
-  });
-}
-
 // ---------- 通用小组件 ----------
 function emptyState(msg) {
   return `<div class="empty">${msg}</div>`;
@@ -429,9 +507,11 @@ document.querySelectorAll('.nav-btn').forEach((b) => {
   };
 });
 
-// 页面重新可见时刷新一次发车
+// 页面重新可见时刷新一次
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden && state.currentStop) loadDepartures();
+  if (document.hidden) return;
+  if (state.currentStop) loadDepartures();
+  else if (state.tab === 'nearby') loadPinned();
 });
 
 // 注册 Service Worker(离线壳)

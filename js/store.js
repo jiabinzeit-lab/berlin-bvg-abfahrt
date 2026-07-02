@@ -49,6 +49,19 @@ export function removeFavorite(id, line = null) {
   );
 }
 
+// ---------- 固定站点 ID 解析缓存 ----------
+// 「附近」栏固定盯某一站,首次按站名解析出 ID 后永久缓存,之后直接用。
+const PIN_KEY = 'bvg.pinnedstop.v1';
+export function getPinnedStop(query) {
+  const m = read(PIN_KEY) || {};
+  return m[query] || null;
+}
+export function setPinnedStop(query, stop) {
+  const m = read(PIN_KEY) || {};
+  m[query] = { id: stop.id, name: stop.name };
+  write(PIN_KEY, m);
+}
+
 // ---------- 发车缓存(用于秒开) ----------
 // 按站点 id 缓存最近一次发车数据。倒计时基于绝对时间计算,缓存数据也能正确倒计时。
 export function getCachedDepartures(id) {
