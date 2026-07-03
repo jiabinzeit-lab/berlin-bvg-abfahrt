@@ -5,7 +5,7 @@
 const API_BASE = 'https://v6.vbb.transport.rest';
 
 // 带重试与退避的 fetch:该免费实例偶尔会返回 429(限流)/503(过载),重试即可恢复。
-async function fetchJSON(pathname, { retries = 2 } = {}) {
+async function fetchJSON(pathname, { retries = 1 } = {}) {
   let lastErr;
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {

@@ -11,7 +11,8 @@ import {
 
 // ---------- 「附近」栏固定盯的站点与线路 ----------
 const PINNED = {
-  query: 'Breitenbachplatz', // 用于首次解析站点 ID
+  id: '900051202', // 写死站点 ID(U Breitenbachplatz),省掉首次解析请求 → 更快
+  query: 'Breitenbachplatz', // 备用:若 id 缺失则按站名解析
   name: 'U Breitenbachplatz',
   lines: ['282', '101', '248', 'U3', '186'], // 只看这几路
 };
@@ -136,8 +137,8 @@ function renderPinned() {
 async function loadPinned() {
   const listEl = document.getElementById('pin-list');
   try {
-    // 解析并缓存站点 ID(仅首次需要联网,之后永久走缓存)
-    let stop = getPinnedStop(PINNED.query);
+    // 站点 ID:优先用写死的 id(零解析请求);否则按站名解析并缓存
+    let stop = PINNED.id ? { id: PINNED.id, name: PINNED.name } : getPinnedStop(PINNED.query);
     if (!stop) {
       const results = await searchStops(PINNED.query);
       stop =
