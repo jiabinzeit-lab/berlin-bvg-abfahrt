@@ -1,6 +1,6 @@
 // Service Worker:缓存应用外壳,实现离线打开与快速加载。
 // 实时发车数据始终走网络(不缓存),保证倒计时准确。
-const CACHE = 'bvg-shell-v6';
+const CACHE = 'bvg-shell-v8';
 const SHELL = [
   './',
   './index.html',
@@ -24,8 +24,8 @@ self.addEventListener('activate', (e) => {
 
 self.addEventListener('fetch', (e) => {
   const url = new URL(e.request.url);
-  // API 请求:永远走网络,不缓存
-  if (url.hostname.endsWith('transport.rest')) return;
+  // API 请求(直连上游 或 走缓存代理):永远走网络,不经 SW 缓存
+  if (url.hostname.endsWith('transport.rest') || url.pathname.startsWith('/api/proxy')) return;
   if (e.request.method !== 'GET') return;
 
   // 应用外壳:优先缓存,回退网络

@@ -1,39 +1,45 @@
 // BVG 实时公交数据接口封装。
-// 数据来源:transport.rest 提供的免费公开 API(基于 HAFAS),无需 API key,已开启 CORS。
-// BVG 源覆盖柏林市区,更对口;与 VBB 版接口结构完全一致,切换只需改这一行。
+// 请求优先走自己的缓存代理(Netlify 函数:双镜像取更快者 + CDN 缓存 ~15s),
+// 代理不可用时自动回退到直连公共 API。
 // 文档:https://v6.bvg.transport.rest/
 const API_BASE = 'https://v6.bvg.transport.rest';
+const PROXY_BASE = 'https://berlin-bvg-abfahrt-8373.netlify.app/api/proxy';
+const USE_PROXY = true;
 
-// 该免费实例常见问题:429/503(过载)或「连上但不返回」的挂起。
-// 关键:用 AbortController 加超时,挂起时快速中止而不是一直卡着;可选少量重试。
 const DEFAULT_TIMEOUT = 7000;
-async function fetchJSON(pathname, { retries = 1, timeout = DEFAULT_TIMEOUT } = {}) {
-  let lastErr;
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), timeout);
+
+// 单次请求(带超时);429/503/非 2xx 抛错。
+async function fetchOnce(fullUrl, timeout) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeout);
+  try {
+    const res = await fetch(fullUrl, { headers: { Accept: 'application/json' }, signal: ctrl.signal });
+    if (res.status === 429 || res.status === 503) throw new Error('服务器繁忙(' + res.status + ')');
+    if (!res.ok) throw new Error('请求失败(' + res.status + ')');
+    return await res.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// 请求策略:优先缓存代理;仅当「代理本身不可达」时才回退直连。
+// 代理已在服务器端竞速 bvg/vbb 两个源,若它明确回报上游 5xx/404,直连也会失败,不再多等。
+async function fetchJSON(pathname, { timeout = DEFAULT_TIMEOUT } = {}) {
+  if (USE_PROXY) {
     try {
-      const res = await fetch(API_BASE + pathname, {
-        headers: { Accept: 'application/json' },
-        signal: ctrl.signal,
-      });
-      if (res.status === 429 || res.status === 503) {
-        throw new Error('服务器繁忙(' + res.status + ')');
-      }
-      if (!res.ok) {
-        throw new Error('请求失败(' + res.status + ')');
-      }
-      return await res.json();
+      return await fetchOnce(PROXY_BASE + '?u=' + encodeURIComponent(pathname), timeout);
     } catch (err) {
-      lastErr = err.name === 'AbortError' ? new Error('请求超时(接口无响应)') : err;
-      if (attempt < retries) {
-        await new Promise((r) => setTimeout(r, 500));
-      }
-    } finally {
-      clearTimeout(timer);
+      const msg = err.name === 'AbortError' ? '请求超时(接口无响应)' : err.message || '';
+      if (/请求失败\(404\)/.test(msg)) throw new Error('请求失败(404)'); // 触发上层按站名重解析
+      if (/请求失败\(50\d\)/.test(msg)) throw new Error('请求超时(接口无响应)'); // 上游挂,别再直连空等
+      // 其它(代理超时/网络错 = 代理本身不可达)→ 落到下面直连兜底
     }
   }
-  throw lastErr;
+  try {
+    return await fetchOnce(API_BASE + pathname, timeout);
+  } catch (err) {
+    throw err.name === 'AbortError' ? new Error('请求超时(接口无响应)') : err;
+  }
 }
 
 // 附近站点(按距离排序)
