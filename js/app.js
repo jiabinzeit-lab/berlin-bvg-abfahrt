@@ -130,8 +130,26 @@ function renderPinned() {
     b.classList.add('spin');
     loadPinned().finally(() => setTimeout(() => b.classList.remove('spin'), 500));
   };
-  app.innerHTML = `<div id="pin-list" class="dep-list"><div class="loading">加载中…</div></div>`;
+  app.innerHTML = `
+    <div id="pin-status" class="pin-status"></div>
+    <div id="pin-list" class="dep-list"><div class="loading">加载中…</div></div>`;
   loadPinned();
+}
+
+function setPinStatus(text, warn = false) {
+  const el = document.getElementById('pin-status');
+  if (!el) return;
+  el.textContent = text;
+  el.classList.toggle('warn', warn);
+}
+
+function berlinClock() {
+  return new Date().toLocaleTimeString('de-DE', {
+    timeZone: 'Europe/Berlin',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
 }
 
 async function loadPinned() {
@@ -161,15 +179,26 @@ async function loadPinned() {
     const refreshBtn = document.getElementById('refresh-btn');
     if (refreshBtn) refreshBtn.classList.add('spin');
 
-    // 只请求地铁 + 公交,payload 更小、更快
-    const deps = await departures(stop.id, { duration: 60, results: 40, products: ['subway', 'bus'] });
+    // 只请求地铁 + 公交,缩短时长/条数;不重试、6s 超时,挂起立即放弃靠缓存兜底
+    const deps = await departures(stop.id, {
+      duration: 30,
+      results: 25,
+      products: ['subway', 'bus'],
+      retries: 0,
+      timeout: 6000,
+    });
     if (state.tab !== 'nearby' || state.currentStop) return; // 用户已离开该栏
     state.pinnedDeps = deps;
     setCachedDepartures(stop.id, deps);
     paintPinned();
+    setPinStatus('已更新 · 柏林时间 ' + berlinClock());
   } catch (err) {
-    if (!state.pinnedDeps.length && listEl) {
+    if (state.pinnedDeps.length) {
+      // 有缓存:保留旧数据显示,只在状态条提示接口无响应
+      setPinStatus('⚠ ' + (err.message || '刷新失败') + ',显示上次数据', true);
+    } else if (listEl) {
       listEl.innerHTML = errorState('加载失败:' + (err.message || ''), loadPinned);
+      setPinStatus('⚠ 接口无响应', true);
     }
   } finally {
     const refreshBtn = document.getElementById('refresh-btn');

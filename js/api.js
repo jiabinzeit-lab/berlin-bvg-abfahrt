@@ -4,13 +4,18 @@
 // 文档:https://v6.vbb.transport.rest/
 const API_BASE = 'https://v6.vbb.transport.rest';
 
-// 带重试与退避的 fetch:该免费实例偶尔会返回 429(限流)/503(过载),重试即可恢复。
-async function fetchJSON(pathname, { retries = 1 } = {}) {
+// 该免费实例常见问题:429/503(过载)或「连上但不返回」的挂起。
+// 关键:用 AbortController 加超时,挂起时快速中止而不是一直卡着;可选少量重试。
+const DEFAULT_TIMEOUT = 7000;
+async function fetchJSON(pathname, { retries = 1, timeout = DEFAULT_TIMEOUT } = {}) {
   let lastErr;
   for (let attempt = 0; attempt <= retries; attempt++) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeout);
     try {
       const res = await fetch(API_BASE + pathname, {
         headers: { Accept: 'application/json' },
+        signal: ctrl.signal,
       });
       if (res.status === 429 || res.status === 503) {
         throw new Error('服务器繁忙(' + res.status + ')');
@@ -20,11 +25,12 @@ async function fetchJSON(pathname, { retries = 1 } = {}) {
       }
       return await res.json();
     } catch (err) {
-      lastErr = err;
-      // 最后一次不再等待
+      lastErr = err.name === 'AbortError' ? new Error('请求超时(接口无响应)') : err;
       if (attempt < retries) {
-        await new Promise((r) => setTimeout(r, 600 * (attempt + 1)));
+        await new Promise((r) => setTimeout(r, 500));
       }
+    } finally {
+      clearTimeout(timer);
     }
   }
   throw lastErr;
@@ -60,13 +66,16 @@ const ALL_PRODUCTS = ['suburban', 'subway', 'tram', 'bus', 'ferry', 'express', '
 
 // 某站的实时发车列表。products 传入允许的类型数组(如 ['subway','bus'])时,
 // 只请求这些类型,payload 更小、更快。
-export async function departures(stopId, { duration = 40, results = 30, products = null } = {}) {
+export async function departures(stopId, { duration = 40, results = 30, products = null, retries, timeout } = {}) {
   const params = { duration, results, remarks: 'false', language: 'en' };
   if (products && products.length) {
     for (const p of ALL_PRODUCTS) params[p] = products.includes(p) ? 'true' : 'false';
   }
   const q = new URLSearchParams(params);
-  const data = await fetchJSON('/stops/' + encodeURIComponent(stopId) + '/departures?' + q.toString());
+  const data = await fetchJSON('/stops/' + encodeURIComponent(stopId) + '/departures?' + q.toString(), {
+    ...(retries != null ? { retries } : {}),
+    ...(timeout != null ? { timeout } : {}),
+  });
   // v6 返回 { departures: [...] }
   return Array.isArray(data) ? data : data.departures || [];
 }

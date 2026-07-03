@@ -104,6 +104,12 @@ body {
 }
 .chip-on { background: var(--accent); color: #fff; border-color: var(--accent); }
 
+.pin-status {
+  padding: 6px 16px; font-size: 11px; color: var(--muted);
+  border-bottom: 1px solid var(--line); min-height: 26px;
+}
+.pin-status.warn { color: #ffb020; }
+
 .dep-list { padding: 6px 0; }
 .dep-row {
   display: flex; align-items: center; gap: 12px;
