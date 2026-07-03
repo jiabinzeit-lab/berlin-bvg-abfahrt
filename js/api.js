@@ -1,8 +1,8 @@
-// VBB 实时公交数据接口封装。
+// BVG 实时公交数据接口封装。
 // 数据来源:transport.rest 提供的免费公开 API(基于 HAFAS),无需 API key,已开启 CORS。
-// VBB 覆盖柏林 + 勃兰登堡全域(含 Potsdam 等近郊),接口结构与 BVG 版完全一致。
-// 文档:https://v6.vbb.transport.rest/
-const API_BASE = 'https://v6.vbb.transport.rest';
+// BVG 源覆盖柏林市区,更对口;与 VBB 版接口结构完全一致,切换只需改这一行。
+// 文档:https://v6.bvg.transport.rest/
+const API_BASE = 'https://v6.bvg.transport.rest';
 
 // 该免费实例常见问题:429/503(过载)或「连上但不返回」的挂起。
 // 关键:用 AbortController 加超时,挂起时快速中止而不是一直卡着;可选少量重试。

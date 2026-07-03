@@ -14,9 +14,9 @@
 
 ## 数据来源
 
-免费公开 API [`v6.vbb.transport.rest`](https://v6.vbb.transport.rest/)(基于 HAFAS,VBB 官方数据,
-覆盖柏林 + 勃兰登堡全域),**无需 API key**,已开启 CORS。注意该免费实例有限流(~100 次/分钟),偶发 `503` 会自动重试。
-如需切回仅柏林市区的 BVG,把 `js/api.js` 里的 `API_BASE` 改成 `https://v6.bvg.transport.rest` 即可。
+免费公开 API [`v6.bvg.transport.rest`](https://v6.bvg.transport.rest/)(基于 HAFAS,BVG 柏林市区数据),
+**无需 API key**,已开启 CORS。该免费实例偶发 `503`/无响应,App 已加超时与缓存兜底。
+如需切到覆盖勃兰登堡的 VBB,把 `js/api.js` 里的 `API_BASE` 改成 `https://v6.vbb.transport.rest` 即可。
 
 ## 本地运行
 

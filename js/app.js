@@ -152,18 +152,29 @@ function berlinClock() {
   });
 }
 
+// 按站名解析出固定站点(用于写死 id 在当前数据源不可用时兜底)
+async function resolvePinnedByName() {
+  const results = await searchStops(PINNED.query);
+  const s =
+    results.find((x) => /Breitenbachplatz/i.test(x.name) && x.products && x.products.subway) ||
+    results.find((x) => /Breitenbachplatz/i.test(x.name)) ||
+    results[0];
+  if (!s) throw new Error('未找到该站点');
+  return { id: s.id, name: s.name };
+}
+
+// 拉取固定看板发车:只要地铁+公交、缩短时长/条数、不重试、6s 超时
+function fetchPinnedDeps(id) {
+  return departures(id, { duration: 30, results: 25, products: ['subway', 'bus'], retries: 0, timeout: 6000 });
+}
+
 async function loadPinned() {
   const listEl = document.getElementById('pin-list');
   try {
-    // 站点 ID:优先用写死的 id(零解析请求);否则按站名解析并缓存
-    let stop = PINNED.id ? { id: PINNED.id, name: PINNED.name } : getPinnedStop(PINNED.query);
+    // 站点 ID:已解析缓存 > 写死 id;都没有则按站名解析
+    let stop = getPinnedStop(PINNED.query) || (PINNED.id ? { id: PINNED.id, name: PINNED.name } : null);
     if (!stop) {
-      const results = await searchStops(PINNED.query);
-      stop =
-        results.find((s) => /Breitenbachplatz/i.test(s.name) && s.products && s.products.subway) ||
-        results.find((s) => /Breitenbachplatz/i.test(s.name)) ||
-        results[0];
-      if (!stop) throw new Error('未找到该站点');
+      stop = await resolvePinnedByName();
       setPinnedStop(PINNED.query, stop);
     }
 
@@ -179,14 +190,25 @@ async function loadPinned() {
     const refreshBtn = document.getElementById('refresh-btn');
     if (refreshBtn) refreshBtn.classList.add('spin');
 
-    // 只请求地铁 + 公交,缩短时长/条数;不重试、6s 超时,挂起立即放弃靠缓存兜底
-    const deps = await departures(stop.id, {
-      duration: 30,
-      results: 25,
-      products: ['subway', 'bus'],
-      retries: 0,
-      timeout: 6000,
-    });
+    let deps;
+    try {
+      deps = await fetchPinnedDeps(stop.id);
+    } catch (err) {
+      // 写死 id 在当前数据源不存在(404/未找到)→ 按站名重解析一次并缓存,再试
+      if (/404|not ?found|未找到/i.test(err.message || '')) {
+        const resolved = await resolvePinnedByName();
+        if (resolved.id !== stop.id) {
+          setPinnedStop(PINNED.query, resolved);
+          stop = resolved;
+          deps = await fetchPinnedDeps(stop.id);
+        } else {
+          throw err;
+        }
+      } else {
+        throw err;
+      }
+    }
+
     if (state.tab !== 'nearby' || state.currentStop) return; // 用户已离开该栏
     state.pinnedDeps = deps;
     setCachedDepartures(stop.id, deps);
