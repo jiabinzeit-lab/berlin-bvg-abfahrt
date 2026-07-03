@@ -152,9 +152,12 @@ function berlinClock() {
   });
 }
 
-// 按站名解析出固定站点(用于写死 id 在当前数据源不可用时兜底)
-async function resolvePinnedByName() {
-  const results = await searchStops(PINNED.query);
+// 数据源优先级:先 VBB(双镜像,含那几路公交),挂了再切 DB(独立后端,至少能保 U3/S-Bahn)
+const PINNED_SOURCES = ['vbb', 'db'];
+
+// 在指定源上按站名解析固定站点
+async function resolvePinnedByName(src) {
+  const results = await searchStops(PINNED.query, { src });
   const s =
     results.find((x) => /Breitenbachplatz/i.test(x.name) && x.products && x.products.subway) ||
     results.find((x) => /Breitenbachplatz/i.test(x.name)) ||
@@ -163,67 +166,77 @@ async function resolvePinnedByName() {
   return { id: s.id, name: s.name };
 }
 
-// 拉取固定看板发车:只要地铁+公交、缩短时长/条数、不重试、6s 超时
-function fetchPinnedDeps(id) {
-  return departures(id, { duration: 30, results: 25, products: ['subway', 'bus'], retries: 0, timeout: 6000 });
+// 拉取固定看板发车:只要地铁+公交、缩短时长/条数、6s 超时
+function fetchPinnedDeps(id, src) {
+  return departures(id, { duration: 30, results: 25, products: ['subway', 'bus'], timeout: 6000, src });
+}
+
+// 从某个源取发车(站点 id 按源解析并缓存;写死 id 仅 vbb 用;404 自愈)
+async function getDepsFromSource(src) {
+  const key = src + ':' + PINNED.query;
+  let stop = getPinnedStop(key) || (src === 'vbb' && PINNED.id ? { id: PINNED.id, name: PINNED.name } : null);
+  if (!stop) {
+    stop = await resolvePinnedByName(src);
+    setPinnedStop(key, stop);
+  }
+  try {
+    return { stop, deps: await fetchPinnedDeps(stop.id, src) };
+  } catch (err) {
+    if (/请求失败\(404\)|未找到/i.test(err.message || '')) {
+      const resolved = await resolvePinnedByName(src);
+      if (resolved.id !== stop.id) {
+        setPinnedStop(key, resolved);
+        return { stop: resolved, deps: await fetchPinnedDeps(resolved.id, src) };
+      }
+    }
+    throw err;
+  }
 }
 
 async function loadPinned() {
   const listEl = document.getElementById('pin-list');
-  try {
-    // 站点 ID:已解析缓存 > 写死 id;都没有则按站名解析
-    let stop = getPinnedStop(PINNED.query) || (PINNED.id ? { id: PINNED.id, name: PINNED.name } : null);
-    if (!stop) {
-      stop = await resolvePinnedByName();
-      setPinnedStop(PINNED.query, stop);
+
+  // 秒开:用上次成功的站点缓存立即渲染
+  if (!state.pinnedDeps.length) {
+    const last = getPinnedStop('last');
+    const cached = last && getCachedDepartures(last.id);
+    if (cached && cached.length) {
+      state.pinnedDeps = cached;
+      paintPinned();
     }
+  }
 
-    // 秒开:先渲染缓存,再后台刷新
-    if (!state.pinnedDeps.length) {
-      const cached = getCachedDepartures(stop.id);
-      if (cached && cached.length) {
-        state.pinnedDeps = cached;
-        paintPinned();
-      }
-    }
+  const refreshBtn = document.getElementById('refresh-btn');
+  if (refreshBtn) refreshBtn.classList.add('spin');
 
-    const refreshBtn = document.getElementById('refresh-btn');
-    if (refreshBtn) refreshBtn.classList.add('spin');
-
-    let deps;
+  // 依次尝试各数据源,第一个成功即用
+  let result = null;
+  let lastErr;
+  for (const src of PINNED_SOURCES) {
     try {
-      deps = await fetchPinnedDeps(stop.id);
-    } catch (err) {
-      // 写死 id 在当前数据源不存在(404/未找到)→ 按站名重解析一次并缓存,再试
-      if (/404|not ?found|未找到/i.test(err.message || '')) {
-        const resolved = await resolvePinnedByName();
-        if (resolved.id !== stop.id) {
-          setPinnedStop(PINNED.query, resolved);
-          stop = resolved;
-          deps = await fetchPinnedDeps(stop.id);
-        } else {
-          throw err;
-        }
-      } else {
-        throw err;
-      }
+      result = { src, ...(await getDepsFromSource(src)) };
+      break;
+    } catch (e) {
+      lastErr = e;
     }
+  }
 
+  try {
     if (state.tab !== 'nearby' || state.currentStop) return; // 用户已离开该栏
-    state.pinnedDeps = deps;
-    setCachedDepartures(stop.id, deps);
+    if (!result) throw lastErr || new Error('加载失败');
+    state.pinnedDeps = result.deps;
+    setCachedDepartures(result.stop.id, result.deps);
+    setPinnedStop('last', result.stop);
     paintPinned();
-    setPinStatus('已更新 · 柏林时间 ' + berlinClock());
+    setPinStatus('已更新 · 柏林时间 ' + berlinClock() + (result.src === 'db' ? ' · DB 源' : ''));
   } catch (err) {
     if (state.pinnedDeps.length) {
-      // 有缓存:保留旧数据显示,只在状态条提示接口无响应
       setPinStatus('⚠ ' + (err.message || '刷新失败') + ',显示上次数据', true);
     } else if (listEl) {
       listEl.innerHTML = errorState('加载失败:' + (err.message || ''), loadPinned);
-      setPinStatus('⚠ 接口无响应', true);
+      setPinStatus('⚠ 两个数据源都无响应', true);
     }
   } finally {
-    const refreshBtn = document.getElementById('refresh-btn');
     if (refreshBtn) refreshBtn.classList.remove('spin');
     if (state.tab === 'nearby' && !state.currentStop) schedulePinnedRefresh();
   }

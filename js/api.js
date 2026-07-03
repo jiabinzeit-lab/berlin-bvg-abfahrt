@@ -6,6 +6,9 @@ const API_BASE = 'https://v6.bvg.transport.rest';
 const PROXY_BASE = 'https://berlin-bvg-abfahrt-8373.netlify.app/api/proxy';
 const USE_PROXY = true;
 
+// 直连兜底时,各数据源对应的公共 API 基址(vbb 用 bvg 镜像,db 用德铁源)
+const SRC_BASE = { vbb: API_BASE, db: 'https://v6.db.transport.rest' };
+
 const DEFAULT_TIMEOUT = 7000;
 
 // 单次请求(带超时);429/503/非 2xx 抛错。
@@ -24,10 +27,10 @@ async function fetchOnce(fullUrl, timeout) {
 
 // 请求策略:优先缓存代理;仅当「代理本身不可达」时才回退直连。
 // 代理已在服务器端竞速 bvg/vbb 两个源,若它明确回报上游 5xx/404,直连也会失败,不再多等。
-async function fetchJSON(pathname, { timeout = DEFAULT_TIMEOUT } = {}) {
+async function fetchJSON(pathname, { timeout = DEFAULT_TIMEOUT, src = 'vbb' } = {}) {
   if (USE_PROXY) {
     try {
-      return await fetchOnce(PROXY_BASE + '?u=' + encodeURIComponent(pathname), timeout);
+      return await fetchOnce(PROXY_BASE + '?src=' + src + '&u=' + encodeURIComponent(pathname), timeout);
     } catch (err) {
       const msg = err.name === 'AbortError' ? '请求超时(接口无响应)' : err.message || '';
       if (/请求失败\(404\)/.test(msg)) throw new Error('请求失败(404)'); // 触发上层按站名重解析
@@ -36,7 +39,7 @@ async function fetchJSON(pathname, { timeout = DEFAULT_TIMEOUT } = {}) {
     }
   }
   try {
-    return await fetchOnce(API_BASE + pathname, timeout);
+    return await fetchOnce((SRC_BASE[src] || API_BASE) + pathname, timeout);
   } catch (err) {
     throw err.name === 'AbortError' ? new Error('请求超时(接口无响应)') : err;
   }
@@ -55,7 +58,7 @@ export function nearbyStops(latitude, longitude, results = 12) {
 }
 
 // 按名称搜索站点
-export function searchStops(query, results = 10) {
+export function searchStops(query, { results = 10, src } = {}) {
   const q = new URLSearchParams({
     query,
     results,
@@ -64,7 +67,7 @@ export function searchStops(query, results = 10) {
     addresses: 'false',
     poi: 'false',
   });
-  return fetchJSON('/locations?' + q.toString());
+  return fetchJSON('/locations?' + q.toString(), src ? { src } : {});
 }
 
 // VBB 交通方式(用于按类型过滤,减小返回体积)
@@ -72,15 +75,15 @@ const ALL_PRODUCTS = ['suburban', 'subway', 'tram', 'bus', 'ferry', 'express', '
 
 // 某站的实时发车列表。products 传入允许的类型数组(如 ['subway','bus'])时,
 // 只请求这些类型,payload 更小、更快。
-export async function departures(stopId, { duration = 40, results = 30, products = null, retries, timeout } = {}) {
+export async function departures(stopId, { duration = 40, results = 30, products = null, timeout, src } = {}) {
   const params = { duration, results, remarks: 'false', language: 'en' };
   if (products && products.length) {
     for (const p of ALL_PRODUCTS) params[p] = products.includes(p) ? 'true' : 'false';
   }
   const q = new URLSearchParams(params);
   const data = await fetchJSON('/stops/' + encodeURIComponent(stopId) + '/departures?' + q.toString(), {
-    ...(retries != null ? { retries } : {}),
     ...(timeout != null ? { timeout } : {}),
+    ...(src ? { src } : {}),
   });
   // v6 返回 { departures: [...] }
   return Array.isArray(data) ? data : data.departures || [];

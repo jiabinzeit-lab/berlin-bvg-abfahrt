@@ -1,7 +1,11 @@
 // 缓存代理:客户端 → 本函数 → bvg/vbb 双镜像(取先返回成功的)→ Netlify CDN 缓存 ~15s。
 // 目的:1) 服务器端网络到上游更稳更快;2) 双镜像容错(一个挂了用另一个);3) CDN 缓存让高频/多人访问秒回。
 // 安全:只允许代理 transport.rest 的 departures / locations 路径,不做开放代理。
-const MIRRORS = ['https://v6.bvg.transport.rest', 'https://v6.vbb.transport.rest'];
+// 数据源:vbb = bvg+vbb 双镜像(同一 id 空间);db = 德铁 HAFAS(独立后端,不同 id)
+const SOURCES = {
+  vbb: ['https://v6.bvg.transport.rest', 'https://v6.vbb.transport.rest'],
+  db: ['https://v6.db.transport.rest'],
+};
 const ALLOWED = [/^\/stops\/[^/]+\/departures(\?|$)/, /^\/locations(\?|\/|$)/];
 
 export const config = { path: '/api/proxy' };
@@ -26,17 +30,19 @@ async function tryMirror(base, path, ms) {
 export default async (req) => {
   if (req.method === 'OPTIONS') return new Response('', { status: 204, headers: CORS });
 
-  const path = new URL(req.url).searchParams.get('u') || '';
-  if (!path.startsWith('/') || !ALLOWED.some((re) => re.test(path))) {
-    return new Response(JSON.stringify({ error: 'bad or disallowed path' }), {
+  const params = new URL(req.url).searchParams;
+  const path = params.get('u') || '';
+  const bases = SOURCES[params.get('src') || 'vbb'];
+  if (!bases || !path.startsWith('/') || !ALLOWED.some((re) => re.test(path))) {
+    return new Response(JSON.stringify({ error: 'bad or disallowed request' }), {
       status: 400,
       headers: { ...CORS, 'Content-Type': 'application/json' },
     });
   }
 
-  // 并行竞速两个镜像:取先返回 2xx 的那个;都失败则汇总状态
+  // 并行竞速该源下的镜像:取先返回 2xx 的那个;都失败则汇总状态
   let seen404 = false;
-  const attempts = MIRRORS.map(async (base) => {
+  const attempts = bases.map(async (base) => {
     const r = await tryMirror(base, path, 5000);
     if (r.ok) return r; // 成功 → 参与 Promise.any 竞速
     if (r.status === 404) seen404 = true;
