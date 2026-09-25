@@ -83,3 +83,27 @@ export function setCachedDepartures(id, deps) {
   }
   write(DEP_KEY, all);
 }
+
+// ---------- 「Home」路牌:去固定站点的路线 ----------
+// 用户选中的路线(线路组合签名,如 "186›U3";null = 全部),下次打开沿用。
+const ROUTE_PREF_KEY = 'bvg.homeroute.v1';
+export function getRoutePref() {
+  return read(ROUTE_PREF_KEY);
+}
+export function setRoutePref(sig) {
+  write(ROUTE_PREF_KEY, sig || null);
+}
+
+// 最近一次的换乘方案(秒开用;显示前会丢弃已发车的)
+const HOME_JN_KEY = 'bvg.homejn.v1';
+export function getCachedHomeJourneys() {
+  const c = read(HOME_JN_KEY);
+  return c && Array.isArray(c.journeys) ? c : null;
+}
+export function setCachedHomeJourneys(journeys, src) {
+  try {
+    write(HOME_JN_KEY, { ts: Date.now(), src, journeys });
+  } catch {
+    // 配额满就不缓存,不影响使用
+  }
+}

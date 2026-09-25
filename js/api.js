@@ -57,29 +57,60 @@ export function nearbyStops(latitude, longitude, results = 12) {
   return fetchJSON('/locations/nearby?' + q.toString());
 }
 
-// 按名称搜索站点
-export function searchStops(query, { results = 10, src } = {}) {
+// 按名称搜索站点。addresses/poi 打开后,结果里会混入地址与兴趣点(用于「路线」选目的地)。
+export function searchStops(query, { results = 10, src, addresses = false, poi = false } = {}) {
   const q = new URLSearchParams({
     query,
     results,
     fuzzy: 'true',
     stops: 'true',
-    addresses: 'false',
-    poi: 'false',
+    addresses: addresses ? 'true' : 'false',
+    poi: poi ? 'true' : 'false',
   });
   return fetchJSON('/locations?' + q.toString(), src ? { src } : {});
 }
 
-// VBB 交通方式(用于按类型过滤,减小返回体积)
+// 交通方式开关(用于按类型过滤,减小返回体积)。vbb 与 db 两个后端的类型名不同。
 const ALL_PRODUCTS = ['suburban', 'subway', 'tram', 'bus', 'ferry', 'express', 'regional'];
+const DB_PRODUCTS = ['nationalExpress', 'national', 'regionalExpress', 'regional', 'suburban', 'bus', 'ferry', 'subway', 'tram', 'taxi'];
+
+function putProducts(params, products, src) {
+  if (!products || !products.length) return;
+  for (const p of src === 'db' ? DB_PRODUCTS : ALL_PRODUCTS) params[p] = products.includes(p) ? 'true' : 'false';
+}
+
+// 换乘方案:from/to 可为站点 id 字符串,或 { latitude, longitude, address } 坐标。
+// products 如 ['subway','bus'] 时只用这些交通方式(步行段不受影响)。
+export async function journeys(from, to, { results = 4, products = null, src, timeout = 9000 } = {}) {
+  const params = { results, stopovers: 'false', remarks: 'false', language: 'en' };
+  const put = (prefix, place) => {
+    if (place && typeof place === 'object') {
+      params[prefix + '.latitude'] = place.latitude;
+      params[prefix + '.longitude'] = place.longitude;
+      params[prefix + '.address'] = place.address || '位置';
+    } else {
+      params[prefix] = place;
+    }
+  };
+  put('from', from);
+  put('to', to);
+  putProducts(params, products, src);
+  const data = await fetchJSON('/journeys?' + new URLSearchParams(params).toString(), { timeout, ...(src ? { src } : {}) });
+  return Array.isArray(data) ? data : data.journeys || [];
+}
+
+// 单趟车的完整行程(stopovers = 沿途每站的计划/实时到发时间),用于推算车现在开到哪了。
+export async function trip(tripId, { timeout = 6000 } = {}) {
+  const q = new URLSearchParams({ stopovers: 'true', remarks: 'false', polyline: 'false', language: 'en' });
+  const data = await fetchJSON('/trips/' + encodeURIComponent(tripId) + '?' + q.toString(), { timeout });
+  return data.trip || data;
+}
 
 // 某站的实时发车列表。products 传入允许的类型数组(如 ['subway','bus'])时,
 // 只请求这些类型,payload 更小、更快。
 export async function departures(stopId, { duration = 40, results = 30, products = null, timeout, src } = {}) {
   const params = { duration, results, remarks: 'false', language: 'en' };
-  if (products && products.length) {
-    for (const p of ALL_PRODUCTS) params[p] = products.includes(p) ? 'true' : 'false';
-  }
+  putProducts(params, products, src);
   const q = new URLSearchParams(params);
   const data = await fetchJSON('/stops/' + encodeURIComponent(stopId) + '/departures?' + q.toString(), {
     ...(timeout != null ? { timeout } : {}),

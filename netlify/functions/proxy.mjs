@@ -6,7 +6,7 @@ const SOURCES = {
   vbb: ['https://v6.bvg.transport.rest', 'https://v6.vbb.transport.rest'],
   db: ['https://v6.db.transport.rest'],
 };
-const ALLOWED = [/^\/stops\/[^/]+\/departures(\?|$)/, /^\/locations(\?|\/|$)/];
+const ALLOWED = [/^\/stops\/[^/]+\/departures(\?|$)/, /^\/locations(\?|\/|$)/, /^\/journeys(\?|$)/, /^\/trips\/[^/?]+(\?|$)/];
 
 export const config = { path: '/api/proxy' };
 

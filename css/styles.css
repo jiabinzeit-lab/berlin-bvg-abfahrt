@@ -79,6 +79,74 @@ body {
   background: rgba(76,141,255,0.12); padding: 2px 8px; border-radius: 20px;
 }
 .chev { color: var(--muted); font-size: 20px; }
+.stop-ico { flex: 0 0 auto; font-size: 16px; width: 22px; text-align: center; }
+
+/* 路线 / 换乘方案 */
+.jn-list { padding: 6px 12px 12px; display: flex; flex-direction: column; gap: 12px; }
+.jn-dest { color: var(--muted); font-size: 13px; padding: 4px 4px 2px; }
+.jn-card {
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: 14px; overflow: hidden;
+}
+.jn-head {
+  display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px;
+  padding: 12px 14px; border-bottom: 1px solid var(--line);
+}
+.jn-when { font-size: 17px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.jn-dur { color: var(--muted); font-size: 13px; }
+.jn-meta { margin-left: auto; color: var(--accent); font-size: 13px; font-variant-numeric: tabular-nums; }
+.jn-legs { padding: 8px 14px 12px; display: flex; flex-direction: column; gap: 6px; }
+.jn-leg { display: flex; gap: 10px; align-items: flex-start; }
+.jn-leg-mid { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; padding-top: 2px; }
+.jn-dir { font-size: 14px; }
+.jn-od { font-size: 12px; color: var(--muted); line-height: 1.5; }
+.jn-walk-ico { flex: 0 0 auto; width: 44px; text-align: center; font-size: 18px; }
+.jn-walk .jn-dir { color: var(--muted); }
+
+/* 固定路牌三栏:Home / 282 / 定位 */
+.tab-sub { padding: 10px 16px 0; font-size: 12px; color: var(--muted); }
+.rt-more {
+  width: 100%; padding: 12px; border: none; background: transparent;
+  color: var(--accent); font-size: 14px; cursor: pointer;
+}
+.rt-chip { display: inline-flex; align-items: center; gap: 4px; padding: 5px 10px; }
+.rt-chip .line-badge.sm { padding: 2px 7px; font-size: 12px; }
+.rt-chip .jn-walk-ico { width: auto; font-size: 14px; }
+.rt-dur { margin-left: 2px; font-size: 13px; font-variant-numeric: tabular-nums; }
+.rt-sep { color: var(--muted); font-size: 12px; }
+.rt-note:not(:empty) { padding: 8px 16px 0; font-size: 12px; color: var(--urgent); }
+.rt-item > summary { list-style: none; cursor: pointer; }
+.rt-item > summary::-webkit-details-marker { display: none; }
+.rt-item[open] > summary { border-bottom-color: transparent; background: var(--surface); }
+.rt-item.cancelled > summary { opacity: 0.5; }
+.rt-badges {
+  flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: center; gap: 3px;
+  max-width: 112px;
+}
+.rt-badges .jn-walk-ico { width: 44px; }
+.rt-row .dep-dir { white-space: normal; line-height: 1.35; }
+.rt-sub { flex-wrap: wrap; row-gap: 4px; }
+.rt-tag { font-size: 12px; color: var(--muted); padding: 1px 0; }
+.rt-legs { background: var(--surface); border-bottom: 1px solid var(--line); }
+
+/* 282 线路图:竖线 + 站点 + 实时车辆 */
+.rm { padding: 4px 16px 14px; }
+.rm-title { font-size: 12px; color: var(--muted); padding: 8px 0 6px; }
+.rm-more { text-align: left; padding: 4px 0 8px 22px; font-size: 12px; }
+.rm-stop, .rm-here, .rm-gap {
+  position: relative; padding-left: 22px; border-left: 3px solid var(--c-bus); margin-left: 6px;
+}
+.rm-stop { display: flex; align-items: center; gap: 6px; min-height: 26px; font-size: 13px; color: var(--muted); }
+.rm-dot {
+  position: absolute; left: -8px; width: 13px; height: 13px; border-radius: 50%;
+  background: var(--bg); border: 3px solid var(--c-bus); box-sizing: border-box;
+}
+.rm-board, .rm-end { color: var(--text); font-weight: 600; }
+.rm-board .rm-dot, .rm-end .rm-dot { background: var(--c-bus); }
+.rm-tag { font-size: 11px; color: var(--accent); border: 1px solid var(--accent); border-radius: 10px; padding: 0 6px; font-weight: 400; }
+.rm-bus { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--urgent); }
+.rm-here { padding-top: 2px; padding-bottom: 4px; }
+.rm-gap { padding-top: 4px; padding-bottom: 4px; border-left-style: dashed; }
 
 /* 搜索 */
 .search-wrap { padding: 12px 14px; position: sticky; top: 0; }
