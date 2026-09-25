@@ -90,26 +90,32 @@ export function loadInspectors(force = false) {
 
 export const inspectorsUpdatedAt = () => reportsTs;
 
-// 仍有效的举报(未过期),附上站名、坐标、几分钟前
-export function activeReports() {
+// 给举报附上站名、坐标、方向名、几分钟前、是否已过期
+function enrich(r, now) {
+  const s = (stations && stations[r.stationId]) || {};
+  const d = r.directionId && stations && stations[r.directionId];
+  return {
+    ...r,
+    line: normLine(r.lineId),
+    stationName: s.name || '',
+    norm: normStation(s.name),
+    latitude: s.coordinates && s.coordinates.latitude,
+    longitude: s.coordinates && s.coordinates.longitude,
+    directionName: d ? d.name : '',
+    minutesAgo: Math.max(0, Math.round((now - new Date(r.timestamp).getTime()) / 60000)),
+    expired: !!r.expiresAt && new Date(r.expiresAt).getTime() <= now,
+  };
+}
+
+// 最近 1 小时的全部举报(含已过期),新的在前 —— 给「动态」信息流用
+export function allReports() {
   const now = Date.now();
-  return reports
-    .filter((r) => !r.expiresAt || new Date(r.expiresAt).getTime() > now)
-    .map((r) => {
-      const s = (stations && stations[r.stationId]) || {};
-      const d = r.directionId && stations && stations[r.directionId];
-      return {
-        ...r,
-        line: normLine(r.lineId),
-        stationName: s.name || '',
-        norm: normStation(s.name),
-        latitude: s.coordinates && s.coordinates.latitude,
-        longitude: s.coordinates && s.coordinates.longitude,
-        directionName: d ? d.name : '',
-        minutesAgo: Math.max(0, Math.round((now - new Date(r.timestamp).getTime()) / 60000)),
-      };
-    })
-    .sort((a, b) => a.minutesAgo - b.minutesAgo);
+  return reports.map((r) => enrich(r, now)).sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+}
+
+// 仍有效的举报(未过期)
+export function activeReports() {
+  return allReports().filter((r) => !r.expired);
 }
 
 // 某条线上的举报(整条线任意站)

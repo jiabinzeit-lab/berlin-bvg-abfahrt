@@ -103,3 +103,13 @@ export function setCachedHomeJourneys(journeys, src) {
     // 配额满就不缓存,不影响使用
   }
 }
+
+// ---------- 「动态」栏关注的线路(排最上面)----------
+const FOLLOW_KEY = 'bvg.ff.follow.v1';
+export function getFollowLines() {
+  const v = read(FOLLOW_KEY);
+  return Array.isArray(v) ? v : ['U3', 'U9'];
+}
+export function setFollowLines(lines) {
+  write(FOLLOW_KEY, lines);
+}

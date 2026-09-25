@@ -1,9 +1,11 @@
 import { searchStops, departures, journeys, trip } from './api.js';
-import { loadInspectors, activeReports, reportsOnLine, reportsAtStation, reportsForLeg, normStation, lineType } from './inspectors.js';
+import { loadInspectors, activeReports, allReports, reportsOnLine, reportsAtStation, reportsForLeg, normStation, lineType } from './inspectors.js';
 import {
   getSaved,
   setSaved,
   newCardId,
+  getFollowLines,
+  setFollowLines,
   getCachedDepartures,
   setCachedDepartures,
   getPinnedStop,
@@ -92,7 +94,7 @@ function esc(s) {
 
 // ---------- 应用状态 ----------
 const state = {
-  tab: 'home', // home(Board:Breitenbachplatz 发车) | s282(Schloßstr. 的 282) | go(定位去 Breitenbachplatz) | saved(常去) | ff(查票)
+  tab: 'home', // home(Board:Breitenbachplatz 发车) | s282(Schloßstr. 的 282) | go(定位去 Breitenbachplatz) | saved(常去) | ff(查票地图) | feed(查票动态)
   homeJourneys: [], // 去固定站点的换乘方案
   routeSel: undefined, // 选中的线路组合签名;null = 全部;undefined = 未初始化(读本地偏好)
   s282: { deps: [], tracked: [] }, // Schloßstr. 的 282 发车 + 正在追踪的几趟车(含沿途站)
@@ -114,6 +116,8 @@ const state = {
   svQuery: '', // 常去:搜索框内容
   svData: {}, // 常去:卡片 id → { deps | journeys, alerts, err, near }
   svOpen: new Set(), // 常去:已展开的目的地卡
+  feedFresh: new Map(), // 动态:新举报 key → 高亮到期时间
+  feedPrimed: false, // 动态:已拿到过一次数据(之后的新增才算「新」)
   refreshTimer: null,
   tickTimer: null,
 };
@@ -133,6 +137,8 @@ function render() {
     renderGo();
   } else if (state.tab === 'ff') {
     renderFF();
+  } else if (state.tab === 'feed') {
+    renderFeed();
   } else {
     renderSaved();
   }
@@ -1013,6 +1019,7 @@ function refreshInspectors(force = false) {
     else if (state.tab === 'go') paintHomeRoutes();
     else if (state.tab === 'saved') paintSavedCards();
     else if (state.tab === 'ff') paintFF();
+    else if (state.tab === 'feed') paintFeed();
   });
 }
 
@@ -1205,6 +1212,122 @@ function paintFF() {
         .addTo(ff.layer);
     }
   }
+}
+
+// ---- 动态栏:FreiFahren 举报实时信息流,关注的线路(默认 U3、U9)排最上面 ----
+const FEED_POLL_MS = 30000;
+const fdKey = (r) => r.stationId + '|' + r.lineId + '|' + r.timestamp;
+
+function renderFeed() {
+  tabHeader('查票动态', () => pollFeed());
+  app.innerHTML = `
+    <div class="tab-sub">FreiFahren 社群举报 · 最近 1 小时 · 每 30 秒自动更新</div>
+    <div id="fd-status" class="pin-status"></div>
+    <div id="fd-follow" class="fd-follow"></div>
+    <div id="fd-list"></div>`;
+  document.getElementById('fd-follow').onclick = (e) => {
+    const b = e.target.closest('[data-follow]');
+    if (!b) return;
+    let lines = getFollowLines();
+    if (b.dataset.follow === '+') {
+      const v = prompt('添加关注的线路(如 U7、S41、M10)', '');
+      const line = (v || '').trim().toUpperCase().replace(/\s+/g, '');
+      if (!line || lines.includes(line)) return;
+      lines = [...lines, line];
+    } else {
+      lines = lines.filter((l) => l !== b.dataset.follow);
+    }
+    setFollowLines(lines);
+    paintFeed();
+  };
+  paintFeed();
+  pollFeed();
+  currentPosition() // 有位置就显示「离你多远」
+    .then(() => onTab('feed') && paintFeed())
+    .catch(() => {});
+  scheduleTab('feed', pollFeed, paintFeed, FEED_POLL_MS);
+}
+
+// 拉最新举报;有新的就高亮一分钟,关注线路有新举报时提示(+ 震动)
+async function pollFeed() {
+  const before = new Set(allReports().map(fdKey));
+  const hadData = before.size > 0 || state.feedPrimed;
+  const ok = await loadInspectors(true);
+  if (!onTab('feed')) return;
+  if (ok) {
+    const follow = new Set(getFollowLines());
+    const fresh = allReports().filter((r) => !before.has(fdKey(r)));
+    if (hadData && fresh.length) {
+      const until = Date.now() + 60000;
+      for (const r of fresh) state.feedFresh.set(fdKey(r), until);
+      const hot = fresh.filter((r) => follow.has(r.line));
+      if (hot.length) {
+        toast('🎫 ' + hot[0].line + ' ' + hot[0].stationName + ' 有人举报查票');
+        if (navigator.vibrate) navigator.vibrate([120, 60, 120]);
+      }
+    }
+    state.feedPrimed = true;
+    setStatus('fd-status', '● 实时 · 上次更新 柏林时间 ' + berlinClock());
+  } else {
+    setStatus('fd-status', '⚠ 暂时拿不到 FreiFahren 数据,稍后自动重试', true);
+  }
+  paintFeed();
+}
+
+function feedItemHtml(r, follow) {
+  const p = productInfo(lineType(r.line));
+  const me = state.coords;
+  const dist = me && r.latitude != null ? distanceM(me, r) : null;
+  const fresh = (state.feedFresh.get(fdKey(r)) || 0) > Date.now();
+  const sub = [
+    r.directionName ? '→ ' + esc(r.directionName) : '',
+    dist != null ? '离你 ' + esc(fmtDist(dist)) : '',
+    r.isPredicted ? '预测' : '',
+    r.expired ? '已过期' : '',
+  ].filter(Boolean);
+  return `<div class="fd-item ${r.expired ? 'fd-old' : ''} ${fresh ? 'fd-new' : ''} ${follow.has(r.line) ? 'fd-hot' : ''}">
+    <div class="fd-time"><b>${esc(berlinTime(r.timestamp))}</b><small style="color:${r.expired ? 'var(--muted)' : ffColor(r.minutesAgo)}">${esc(ffAgo(r))}</small></div>
+    <span class="line-badge sm ${p.cls}">${esc(r.line || '?')}</span>
+    <div class="fd-mid">
+      <div class="fd-st">${esc(r.stationName || '未知站点')}${fresh ? ' <span class="fd-badge">新</span>' : ''}</div>
+      ${sub.length ? `<div class="fd-sub">${sub.join(' · ')}</div>` : ''}
+    </div>
+  </div>`;
+}
+
+function paintFeed() {
+  const listEl = document.getElementById('fd-list');
+  const followEl = document.getElementById('fd-follow');
+  if (!listEl || !followEl) return;
+  const followList = getFollowLines();
+  const follow = new Set(followList);
+  followEl.innerHTML =
+    `<span class="fd-label">关注</span>` +
+    followList.map((l) => `<button class="chip fd-chip" data-follow="${esc(l)}">${esc(l)} ✕</button>`).join('') +
+    `<button class="chip fd-chip fd-add" data-follow="+">+ 添加</button>`;
+
+  const all = allReports();
+  const hot = all.filter((r) => follow.has(r.line));
+  const rest = all.filter((r) => !follow.has(r.line));
+  const hotActive = hot.filter((r) => !r.expired).length;
+  const names = followList.join('、') || '关注线路';
+  listEl.innerHTML = `
+    <div class="fd-sec fd-sec-hot">
+      <div class="fd-sec-h">⭐ ${esc(names)} <span class="fd-count">${hotActive ? hotActive + ' 条有效' : ''}</span></div>
+      ${
+        hot.length
+          ? hot.map((r) => feedItemHtml(r, follow)).join('')
+          : `<div class="fd-empty">✓ ${esc(names)} 最近 1 小时没有查票举报</div>`
+      }
+    </div>
+    <div class="fd-sec">
+      <div class="fd-sec-h">其他线路 <span class="fd-count">${rest.length} 条</span></div>
+      ${
+        rest.length
+          ? rest.map((r) => feedItemHtml(r, follow)).join('')
+          : `<div class="fd-empty">${state.feedPrimed ? '最近 1 小时没有其他举报' : '加载中…'}</div>`
+      }
+    </div>`;
 }
 
 // ---- 常去:自己做的站牌卡 + 目的地卡 ----

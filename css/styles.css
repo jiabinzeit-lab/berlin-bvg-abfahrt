@@ -174,6 +174,28 @@ body {
 .leaflet-control-attribution { background: rgba(11,14,20,0.7) !important; color: var(--muted) !important; }
 .leaflet-control-attribution a { color: var(--muted) !important; }
 
+/* 查票动态(信息流) */
+.fd-follow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 10px 14px 4px; }
+.fd-label { font-size: 12px; color: var(--muted); margin-right: 2px; }
+.fd-chip { padding: 5px 11px; font-size: 13px; }
+.fd-add { color: var(--accent); }
+.fd-sec { padding: 6px 0 4px; }
+.fd-sec-hot { margin: 8px 12px; border: 1px solid rgba(240,80,68,0.35); border-radius: 14px; background: rgba(240,80,68,0.06); overflow: hidden; }
+.fd-sec-h { padding: 8px 14px; font-size: 13px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+.fd-count { font-weight: 400; color: var(--muted); font-size: 12px; }
+.fd-item { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-top: 1px solid var(--line); transition: background .6s; }
+.fd-time { flex: 0 0 auto; width: 58px; display: flex; flex-direction: column; gap: 1px; font-variant-numeric: tabular-nums; }
+.fd-time b { font-size: 15px; }
+.fd-time small { font-size: 11px; }
+.fd-mid { flex: 1; min-width: 0; }
+.fd-st { font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fd-sub { font-size: 12px; color: var(--muted); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fd-old { opacity: 0.45; }
+.fd-new { background: rgba(255,176,32,0.12); }
+.fd-badge { font-size: 11px; color: #111; background: var(--urgent); border-radius: 8px; padding: 0 5px; vertical-align: 2px; }
+.fd-empty { padding: 12px 14px 14px; color: var(--muted); font-size: 13px; border-top: 1px solid var(--line); }
+.fd-sec-hot .fd-empty { color: #4cd07d; }
+
 /* 常去 */
 .hbtn-text { font-size: 15px; color: var(--accent); padding: 0 6px; }
 .sv-cards { padding: 4px 12px 16px; display: flex; flex-direction: column; gap: 10px; }
