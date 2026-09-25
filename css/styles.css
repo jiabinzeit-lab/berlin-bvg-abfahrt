@@ -149,6 +149,31 @@ body {
 .alert-text { padding: 0 10px 10px 30px; line-height: 1.5; color: var(--muted); }
 .alert-until { margin-top: 4px; font-size: 12px; color: var(--urgent); }
 
+/* 查票举报(FreiFahren) */
+.delay.ff { background: rgba(240,80,68,0.18); color: #ff7a6e; }
+.ff-banner {
+  margin: 8px 12px 0; padding: 6px 10px; border-radius: 10px;
+  background: rgba(240,80,68,0.10); border: 1px solid rgba(240,80,68,0.35); font-size: 13px;
+}
+.ff-row { display: flex; align-items: center; gap: 6px; padding: 3px 0; min-width: 0; }
+.ff-st { flex: 1; min-width: 0; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ff-ago { color: #ff7a6e; white-space: nowrap; font-size: 12px; }
+.ff-more { color: var(--muted); font-size: 12px; padding-top: 2px; }
+.rm-ff { font-size: 11px; color: #ff7a6e; background: rgba(240,80,68,0.15); border-radius: 10px; padding: 0 6px; }
+.sv-ffline { padding: 0 12px 10px; }
+.sv-best-mid .delay.ff { align-self: flex-start; margin-top: 3px; }
+.ff-map {
+  height: 52vh; min-height: 280px; margin: 10px 12px 4px; border-radius: 14px; overflow: hidden;
+  border: 1px solid var(--line); background: var(--surface);
+}
+.ff-item { cursor: pointer; }
+.ff-map .leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) brightness(0.85) contrast(0.9) saturate(0.6); }
+.tab-sub a { color: var(--accent); }
+.leaflet-popup-content-wrapper, .leaflet-popup-tip { background: var(--surface-2); color: var(--text); }
+.leaflet-container a.leaflet-popup-close-button { color: var(--muted); }
+.leaflet-control-attribution { background: rgba(11,14,20,0.7) !important; color: var(--muted) !important; }
+.leaflet-control-attribution a { color: var(--muted) !important; }
+
 /* 常去 */
 .hbtn-text { font-size: 15px; color: var(--accent); padding: 0 6px; }
 .sv-cards { padding: 4px 12px 16px; display: flex; flex-direction: column; gap: 10px; }

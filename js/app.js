@@ -1,4 +1,5 @@
 import { searchStops, departures, journeys, trip } from './api.js';
+import { loadInspectors, activeReports, reportsOnLine, reportsAtStation, reportsForLeg, normStation, lineType } from './inspectors.js';
 import {
   getSaved,
   setSaved,
@@ -91,7 +92,7 @@ function esc(s) {
 
 // ---------- 应用状态 ----------
 const state = {
-  tab: 'home', // home(Board:Breitenbachplatz 发车) | s282(Schloßstr. 的 282) | go(定位去 Breitenbachplatz) | saved(常去)
+  tab: 'home', // home(Board:Breitenbachplatz 发车) | s282(Schloßstr. 的 282) | go(定位去 Breitenbachplatz) | saved(常去) | ff(查票)
   homeJourneys: [], // 去固定站点的换乘方案
   routeSel: undefined, // 选中的线路组合签名;null = 全部;undefined = 未初始化(读本地偏好)
   s282: { deps: [], tracked: [] }, // Schloßstr. 的 282 发车 + 正在追踪的几趟车(含沿途站)
@@ -130,10 +131,13 @@ function render() {
     render282();
   } else if (state.tab === 'go') {
     renderGo();
+  } else if (state.tab === 'ff') {
+    renderFF();
   } else {
     renderSaved();
   }
   updateNav();
+  if (!state.currentStop) refreshInspectors();
 }
 
 function updateNav() {
@@ -188,7 +192,11 @@ function tabHeader(title, reload) {
 // 定时:reload 每 refreshMs 拉一次数据,paint 每 10s 重画倒计时
 function scheduleTab(tab, reload, paint, refreshMs) {
   stopTimers();
-  state.refreshTimer = setInterval(() => onTab(tab) && reload(), refreshMs);
+  state.refreshTimer = setInterval(() => {
+    if (!onTab(tab)) return;
+    reload();
+    refreshInspectors();
+  }, refreshMs);
   state.tickTimer = setInterval(() => onTab(tab) && paint(), 10000);
 }
 
@@ -200,6 +208,7 @@ function renderHome() {
     <div class="tab-sub">${esc(pinLines)}</div>
     <div id="pin-status" class="pin-status"></div>
     <div id="pin-alerts" class="alerts"></div>
+    <div id="pin-ff"></div>
     <div id="pin-list" class="dep-list"><div class="loading">加载中…</div></div>`;
   paintAlerts('pin-alerts', state.homeAlerts);
   if (state.pinnedDeps.length) paintPinned();
@@ -214,6 +223,7 @@ function render282() {
     <div class="tab-sub">往 U Breitenbachplatz 方向</div>
     <div id="s282-status" class="pin-status"></div>
     <div id="s282-alerts" class="alerts"></div>
+    <div id="s282-ff"></div>
     <div id="s282-list" class="dep-list"><div class="loading">加载中…</div></div>
     <div id="s282-map"></div>`;
   if (!state.s282.deps.length) state.s282.deps = getCachedDepartures('s282') || [];
@@ -324,6 +334,8 @@ function paint282() {
   const mapEl = document.getElementById('s282-map');
   if (!listEl || !mapEl) return;
   const rows = state.s282.deps.filter(upcoming).sort(byWhen);
+  const ffEl = document.getElementById('s282-ff');
+  if (ffEl) ffEl.innerHTML = ffBannerHtml([...reportsAtStation(S282.name), ...reportsAtStation(PINNED.name)]);
   listEl.innerHTML = rows.length
     ? rows.slice(0, 4).map(depRowHtml).join('')
     : emptyState('近期暂无从 ' + esc(S282.name) + ' 开往 Breitenbachplatz 的 282');
@@ -394,7 +406,7 @@ function routeMapHtml() {
     const tag = i === boardIdx ? '<span class="rm-tag">上车</span>' : cls === 'rm-end' ? '<span class="rm-tag">下车</span>' : '';
     html += `<div class="rm-stop ${cls}">
       <span class="rm-dot"></span>
-      <span class="rm-name">${esc(cleanName(so.stop && so.stop.name))}</span>${tag}
+      <span class="rm-name">${esc(cleanName(so.stop && so.stop.name))}</span>${tag}${ffStopTag(so.stop && so.stop.name)}
     </div>`;
     html += markers.filter((m) => m.idx === i && !m.between).map((m) => `<div class="rm-here">${bus(m)}</div>`).join('');
     html += markers.filter((m) => m.idx === i && m.between).map((m) => `<div class="rm-gap">${bus(m)}</div>`).join('');
@@ -621,6 +633,8 @@ function homeRowHtml(j) {
   const walkEnd = legs.length > 1 && last.walking ? legMinutes(last) : 0;
   if (walkEnd) tags.push(`<span class="rt-tag">下车步行 ${walkEnd} 分</span>`);
   if (arr) tags.push(`<span class="rt-tag">${esc(arr)} 到</span>`);
+  const ffj = journeyInspectors(j);
+  if (ffj.length) tags.unshift(ffTag(ffj));
 
   const min = minutesUntil(first ? legDep(first) : legDep(legs[0]));
   const urgent = min !== null && min <= Math.max(2, walk0) ? 'urgent' : '';
@@ -768,6 +782,11 @@ function paintPinned() {
   const listEl = document.getElementById('pin-list');
   if (!listEl) return;
   const rows = pinnedRows();
+  const ffEl = document.getElementById('pin-ff');
+  if (ffEl) {
+    const here = normStation(PINNED.name);
+    ffEl.innerHTML = ffBannerHtml(activeReports().filter((r) => PINNED.lines.includes(r.line) || r.norm === here));
+  }
 
   if (!rows.length) {
     listEl.innerHTML = emptyState('近期暂无这几路车(' + PINNED.lines.join('、') + ')的班次');
@@ -979,6 +998,213 @@ function paintAlerts(id, alerts) {
   if (!el) return;
   el.innerHTML = alertsHtml(alerts);
   bindDetails(el);
+}
+
+// ---------- 查票举报(FreiFahren 社群数据)----------
+const ffAgo = (r) => (r.minutesAgo <= 0 ? '刚刚' : r.minutesAgo + ' 分钟前');
+const ffColor = (min) => (min <= 10 ? '#F05044' : min <= 30 ? '#FF8A3D' : '#FACB3F');
+
+// 拉最新举报;有新数据就重画当前栏里用到它的部分
+function refreshInspectors(force = false) {
+  return loadInspectors(force).then((changed) => {
+    if (!changed || state.currentStop) return;
+    if (state.tab === 'home') paintPinned();
+    else if (state.tab === 's282') paint282();
+    else if (state.tab === 'go') paintHomeRoutes();
+    else if (state.tab === 'saved') paintSavedCards();
+    else if (state.tab === 'ff') paintFF();
+  });
+}
+
+// 一条方案途经路段上的举报(每段车:上下车站 + 同线路两站之间)
+function journeyInspectors(j) {
+  const seen = new Set();
+  const out = [];
+  for (const leg of rides(j)) {
+    for (const r of reportsForLeg(leg)) {
+      const k = r.stationId + '|' + r.lineId + '|' + r.timestamp;
+      if (!seen.has(k)) {
+        seen.add(k);
+        out.push(r);
+      }
+    }
+  }
+  return out.sort((a, b) => a.minutesAgo - b.minutesAgo);
+}
+
+function ffTag(list) {
+  if (!list || !list.length) return '';
+  const r = list[0];
+  return `<span class="delay ff">🎫 ${esc(r.stationName)}${r.line ? ' · ' + esc(r.line) : ''} · ${esc(ffAgo(r))}${
+    list.length > 1 ? ' 等 ' + list.length + ' 处' : ''
+  }</span>`;
+}
+
+function ffStopTag(name) {
+  const list = reportsAtStation(name);
+  return list.length ? `<span class="rm-ff">🎫 ${esc(list[0].line || '')} ${esc(ffAgo(list[0]))}</span>` : '';
+}
+
+// 举报横幅(Board、282 栏顶部)
+function ffBannerHtml(list, max = 3) {
+  if (!list.length) return '';
+  const seen = new Set();
+  list = list.filter((r) => {
+    const k = r.stationId + '|' + r.lineId + '|' + r.timestamp;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+  return `<div class="ff-banner">${list
+    .slice(0, max)
+    .map(
+      (r) => `<div class="ff-row"><span class="ff-ico">🎫</span><b>${esc(r.line || '?')}</b>
+        <span class="ff-st">${esc(r.stationName)}${r.directionName ? ' → ' + esc(r.directionName) : ''}</span>
+        <span class="ff-ago">${esc(ffAgo(r))}</span></div>`
+    )
+    .join('')}${list.length > max ? `<div class="ff-more">还有 ${list.length - max} 条 · 看「查票」栏</div>` : ''}</div>`;
+}
+
+// ---- 查票栏:最近 1 小时社群举报的火点地图 + 列表 ----
+const ff = { map: null, layer: null, mine: false };
+let leafletJob = null;
+
+function loadLeaflet() {
+  if (window.L) return Promise.resolve(window.L);
+  if (!leafletJob) {
+    leafletJob = new Promise((resolve, reject) => {
+      const css = document.createElement('link');
+      css.rel = 'stylesheet';
+      css.href = 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css';
+      document.head.appendChild(css);
+      const js = document.createElement('script');
+      js.src = 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js';
+      js.onload = () => resolve(window.L);
+      js.onerror = () => {
+        leafletJob = null;
+        reject(new Error('地图组件加载失败,请检查网络'));
+      };
+      document.head.appendChild(js);
+    });
+  }
+  return leafletJob;
+}
+
+// 你常坐的线路:Board 的几路 + 常去站牌卡 + 定位栏方案里的线路
+function myLines() {
+  const set = new Set(PINNED.lines);
+  for (const c of getSaved()) if (c.line) set.add(c.line);
+  for (const j of state.homeJourneys || []) for (const l of rides(j)) set.add(l.line.name);
+  return set;
+}
+
+function renderFF() {
+  tabHeader('查票', () => refreshInspectors(true));
+  app.innerHTML = `
+    <div class="tab-sub">最近 1 小时的社群举报 · 越红越新 · 数据来自
+      <a href="https://freifahren.org" target="_blank" rel="noopener">FreiFahren</a>(Telegram freiFahren_BE)</div>
+    <div id="ff-map" class="ff-map"><div class="loading">加载地图…</div></div>
+    <div id="ff-chips" class="filter-bar rt-chips"></div>
+    <div id="ff-list" class="dep-list"></div>`;
+  ff.map = null;
+  document.getElementById('ff-chips').onclick = (e) => {
+    const b = e.target.closest('[data-mine]');
+    if (!b) return;
+    ff.mine = b.dataset.mine === '1';
+    paintFF();
+  };
+  document.getElementById('ff-list').onclick = (e) => {
+    const row = e.target.closest('[data-lat]');
+    if (row && ff.map) ff.map.flyTo([+row.dataset.lat, +row.dataset.lon], 15, { duration: 0.6 });
+  };
+  loadLeaflet()
+    .then((L) => {
+      if (!onTab('ff')) return;
+      const el = document.getElementById('ff-map');
+      el.innerHTML = '';
+      const c = state.coords;
+      ff.map = L.map(el, { zoomControl: false }).setView(c ? [c.latitude, c.longitude] : [52.505, 13.39], c ? 13 : 11);
+      // OpenStreetMap 官方瓦片(免 key);用 CSS 反色成暗色,和 App 风格一致
+      L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19,
+        attribution: '© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>',
+      }).addTo(ff.map);
+      ff.layer = L.layerGroup().addTo(ff.map);
+      paintFF();
+    })
+    .catch((err) => {
+      const el = document.getElementById('ff-map');
+      if (el) el.innerHTML = errorState(esc(err.message));
+    });
+  paintFF();
+  currentPosition()
+    .then(() => onTab('ff') && paintFF())
+    .catch(() => {});
+  scheduleTab('ff', () => {}, paintFF, 60000);
+}
+
+function paintFF() {
+  const listEl = document.getElementById('ff-list');
+  const chipsEl = document.getElementById('ff-chips');
+  if (!listEl || !chipsEl) return;
+  const mine = myLines();
+  const all = activeReports();
+  const minePart = all.filter((r) => r.line && mine.has(r.line));
+  const list = ff.mine ? minePart : all;
+  chipsEl.innerHTML = `
+    <button class="chip ${ff.mine ? '' : 'chip-on'}" data-mine="0">全部 ${all.length}</button>
+    <button class="chip ${ff.mine ? 'chip-on' : ''}" data-mine="1">我的线路 ${minePart.length}</button>`;
+
+  const me = state.coords;
+  listEl.innerHTML = list.length
+    ? list
+        .map((r) => {
+          const p = productInfo(lineType(r.line));
+          const dist = me && r.latitude != null ? distanceM(me, r) : null;
+          return `<div class="dep-row ff-item" ${r.latitude != null ? `data-lat="${r.latitude}" data-lon="${r.longitude}"` : ''}>
+          <span class="line-badge ${p.cls}">${esc(r.line || '?')}</span>
+          <span class="dep-mid">
+            <span class="dep-dir">${esc(r.stationName || '未知站点')}</span>
+            <span class="dep-sub rt-sub">${r.directionName ? `<span class="rt-tag">→ ${esc(r.directionName)}</span>` : ''}${
+            dist != null ? `<span class="rt-tag">离你 ${esc(fmtDist(dist))}</span>` : ''
+          }${r.line && mine.has(r.line) ? `<span class="delay late">你的线路</span>` : ''}</span>
+          </span>
+          <span class="dep-cd-wrap"><span class="dep-cd" style="color:${ffColor(r.minutesAgo)}">${esc(ffAgo(r))}</span></span>
+        </div>`;
+        })
+        .join('')
+    : emptyState(ff.mine ? '你的线路最近 1 小时没有查票举报' : '最近 1 小时没有查票举报(或数据暂时拿不到)');
+
+  // 地图:同一站的举报合成一个火点,越新越红,次数越多越大;你的线路加白边
+  if (ff.map && ff.layer && window.L) {
+    const L = window.L;
+    ff.layer.clearLayers();
+    const byStation = new Map();
+    for (const r of list) {
+      if (r.latitude == null) continue;
+      const g = byStation.get(r.stationId) || { r, items: [] };
+      g.items.push(r);
+      byStation.set(r.stationId, g);
+    }
+    for (const { r, items } of byStation.values()) {
+      const hit = items.some((x) => x.line && mine.has(x.line));
+      const lines = [...new Set(items.map((x) => x.line || '?'))].join(' · ');
+      L.circleMarker([r.latitude, r.longitude], {
+        radius: 8 + 3 * Math.min(items.length - 1, 4),
+        color: hit ? '#ffffff' : ffColor(r.minutesAgo),
+        weight: hit ? 3 : 1,
+        fillColor: ffColor(r.minutesAgo),
+        fillOpacity: 0.85,
+      })
+        .bindPopup(`<b>${esc(r.stationName)}</b><br>${esc(lines)}<br>${esc(ffAgo(r))}${items.length > 1 ? ' · 共 ' + items.length + ' 条' : ''}`)
+        .addTo(ff.layer);
+    }
+    if (me) {
+      L.circleMarker([me.latitude, me.longitude], { radius: 6, color: '#fff', weight: 2, fillColor: '#4c8dff', fillOpacity: 1 })
+        .bindPopup('你在这里')
+        .addTo(ff.layer);
+    }
+  }
 }
 
 // ---- 常去:自己做的站牌卡 + 目的地卡 ----
@@ -1349,6 +1575,10 @@ function stopCardHtml(c, d) {
   return `<div class="sv-card" data-id="${c.id}">
     <div class="sv-head">${badge}<span class="sv-title">${esc(c.label || cleanName(c.stopName))}</span><span class="sv-dir">${esc(dirTxt)}</span>${cardTools(c)}</div>
     <div class="sv-body" data-act="open-stop" data-id="${c.id}">${body}</div>
+    ${(() => {
+      const ffl = c.line ? reportsOnLine(c.line) : reportsAtStation(c.stopName);
+      return ffl.length ? `<div class="sv-ffline">${ffTag(ffl)}</div>` : '';
+    })()}
     ${d.alerts && d.alerts.length ? `<div class="alerts sv-alerts">${alertsHtml(d.alerts)}</div>` : ''}
   </div>`;
 }
@@ -1397,7 +1627,7 @@ function placeCardHtml(c, d) {
     body = `<div class="sv-best" data-act="toggle-place" data-id="${c.id}">
         <span class="rt-badges">${sigBadges(j)}</span>
         <span class="sv-best-mid"><b class="${leaveIn !== null && leaveIn <= 1 ? 'urgent' : ''}">${esc(leave)}</b>
-          <small>${esc(arr)} 到${dur != null ? ' · 约 ' + dur + ' 分' : ''}</small></span>
+          <small>${esc(arr)} 到${dur != null ? ' · 约 ' + dur + ' 分' : ''}</small>${ffTag(journeyInspectors(j))}</span>
         <span class="sv-more">${open ? '收起' : '更多 ' + all.length}</span>
       </div>
       ${open ? `${note}${chips}<div class="sv-jn">${rows.map(homeRowHtml).join('')}</div>` : ''}`;
@@ -1607,6 +1837,7 @@ document.addEventListener('visibilitychange', () => {
   else if (state.tab === 's282') load282();
   else if (state.tab === 'go') loadHomeRoutes();
   else if (state.tab === 'saved') loadSaved();
+  if (!state.currentStop) refreshInspectors();
 });
 
 // 注册 Service Worker(离线壳)
