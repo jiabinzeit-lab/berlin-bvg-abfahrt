@@ -146,11 +146,12 @@ function updateNav() {
 // ---- 固定路牌三个栏:
 //   home) Board:U Breitenbachplatz 本站发车表(只看指定几路车;282 只看往 Dardanellenweg)
 //   s282) U Schloßstr. 往 Breitenbachplatz 的 282 时刻 + 整条线上车开到哪了
-//   go)   按定位:从当前位置去 U Breitenbachplatz 的公交 / U-Bahn / S-Bahn 方案(按线路组合可选)
-const HOME_PRODUCTS = ['subway', 'suburban', 'bus']; // 公交 + U-Bahn + S-Bahn(不坐 Tram / 区域火车)
-const RAIL_PRODUCTS = ['subway', 'suburban']; // 单独查一遍「只坐 U+S」,补出 U 转 S 这类方案
+//   go)   按定位:从当前位置去 U Breitenbachplatz 的公共交通方案(按线路组合可选)
+// 公交 + Tram + U-Bahn + S-Bahn + 区域火车 RE/RB(不含 IC/ICE 长途和渡轮)
+const HOME_PRODUCTS = ['subway', 'suburban', 'tram', 'bus', 'regional'];
+const RAIL_PRODUCTS = ['subway', 'suburban', 'regional']; // 单独查一遍「只坐轨道」,补出 U 转 S 这类方案
 
-// 路线更多元:同时查「允许的全部交通方式」和「只坐 U+S」,合并去重。
+// 路线更多元:同时查「允许的全部交通方式」和「只坐轨道(U / S / RE·RB)」,合并去重。
 // 公交更快时 HAFAS 往往只给公交方案,单独查轨道才能看到 U9›S46›U3 这类换乘。
 async function diverseJourneys(from, to, { products = null, results = 6, src } = {}) {
   const [main, rail] = await Promise.all([
@@ -226,7 +227,7 @@ function render282() {
 function renderGo() {
   tabHeader('去 ' + PINNED.name, loadHomeRoutes);
   app.innerHTML = `
-    <div class="tab-sub">从你现在的位置出发 · 公交 / U-Bahn / S-Bahn</div>
+    <div class="tab-sub">从你现在的位置出发 · 公交 / Tram / U / S / RE·RB</div>
     <div id="rt-status" class="pin-status"></div>
     <div id="rt-chips" class="filter-bar rt-chips"></div>
     <div id="rt-note" class="rt-note"></div>
@@ -569,7 +570,7 @@ function paintHomeRoutes() {
 
   const rows = sel ? all.filter((j) => routeSig(j) === sel) : all;
   if (!rows.length) {
-    listEl.innerHTML = emptyState('近期没有坐公交 / U / S 去 ' + esc(PINNED.name) + ' 的方案');
+    listEl.innerHTML = emptyState('近期没有坐公共交通去 ' + esc(PINNED.name) + ' 的方案');
     return;
   }
   listEl.innerHTML = rows.map(homeRowHtml).join('');
@@ -1267,7 +1268,7 @@ async function loadCard(c, force = false) {
         data.near = true;
       } else {
         const me = { latitude: +coords.latitude.toFixed(4), longitude: +coords.longitude.toFixed(4), address: '我的位置' };
-        data.journeys = await diverseJourneys(me, c.to, { results: 6 });
+        data.journeys = await diverseJourneys(me, c.to, { results: 6, products: HOME_PRODUCTS });
         data.near = false;
       }
       if (!onTab('saved')) return;
