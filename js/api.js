@@ -100,16 +100,18 @@ export async function journeys(from, to, { results = 4, products = null, src, ti
 }
 
 // 单趟车的完整行程(stopovers = 沿途每站的计划/实时到发时间),用于推算车现在开到哪了。
-export async function trip(tripId, { timeout = 6000 } = {}) {
-  const q = new URLSearchParams({ stopovers: 'true', remarks: 'false', polyline: 'false', language: 'en' });
+// stopovers=false + remarks=true 可只取整趟车(整条线)的运营提示,很轻。
+export async function trip(tripId, { stopovers = true, remarks = false, timeout = 6000 } = {}) {
+  const q = new URLSearchParams({ stopovers: String(stopovers), remarks: String(remarks), polyline: 'false', language: 'en' });
   const data = await fetchJSON('/trips/' + encodeURIComponent(tripId) + '?' + q.toString(), { timeout });
   return data.trip || data;
 }
 
 // 某站的实时发车列表。products 传入允许的类型数组(如 ['subway','bus'])时,
 // 只请求这些类型,payload 更小、更快。
-export async function departures(stopId, { duration = 40, results = 30, products = null, timeout, src } = {}) {
-  const params = { duration, results, remarks: 'false', language: 'en' };
+// remarks=true 时每班车带运营提示(绕行/停运/本站不停等)。
+export async function departures(stopId, { duration = 40, results = 30, products = null, remarks = false, timeout, src } = {}) {
+  const params = { duration, results, remarks: remarks ? 'true' : 'false', language: 'en' };
   putProducts(params, products, src);
   const q = new URLSearchParams(params);
   const data = await fetchJSON('/stops/' + encodeURIComponent(stopId) + '/departures?' + q.toString(), {

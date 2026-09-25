@@ -1,8 +1,8 @@
 import { searchStops, departures, journeys, trip } from './api.js';
 import {
-  getFavorites,
-  isFavorite,
-  toggleFavorite,
+  getSaved,
+  setSaved,
+  newCardId,
   getCachedDepartures,
   setCachedDepartures,
   getPinnedStop,
@@ -91,7 +91,7 @@ function esc(s) {
 
 // ---------- 应用状态 ----------
 const state = {
-  tab: 'home', // home(Breitenbachplatz 发车) | s282(Schloßstr. 的 282) | go(定位去 Breitenbachplatz) | route | search | favorites
+  tab: 'home', // home(Board:Breitenbachplatz 发车) | s282(Schloßstr. 的 282) | go(定位去 Breitenbachplatz) | saved(常去)
   homeJourneys: [], // 去固定站点的换乘方案
   routeSel: undefined, // 选中的线路组合签名;null = 全部;undefined = 未初始化(读本地偏好)
   s282: { deps: [], tracked: [] }, // Schloßstr. 的 282 发车 + 正在追踪的几趟车(含沿途站)
@@ -103,8 +103,16 @@ const state = {
   lineFilter: null, // 只看某条线路时的线路名
   pinnedDeps: [], // 固定站点的发车数据
   coords: null, // 最近一次定位坐标(会话内复用,避免重复请求权限)
-  routeDest: null, // 路线目的地 { to, label };to 为站点 id 或坐标
-  routeJourneys: [], // 路线换乘方案
+  alertCache: {}, // 线路+方向 → { ts, list } 整条线的运营提示(2 分钟内复用)
+  alertOpen: new Set(), // 已展开的提示
+  homeAlerts: [],
+  s282Alerts: [],
+  svEdit: false, // 常去:编辑模式(排序/删除)
+  svAdd: null, // 常去:正在添加的卡片草稿
+  svSearch: [], // 常去:搜索结果
+  svQuery: '', // 常去:搜索框内容
+  svData: {}, // 常去:卡片 id → { deps | journeys, alerts, err, near }
+  svOpen: new Set(), // 常去:已展开的目的地卡
   refreshTimer: null,
   tickTimer: null,
 };
@@ -122,12 +130,8 @@ function render() {
     render282();
   } else if (state.tab === 'go') {
     renderGo();
-  } else if (state.tab === 'route') {
-    renderRoute();
-  } else if (state.tab === 'search') {
-    renderSearch();
   } else {
-    renderFavorites();
+    renderSaved();
   }
   updateNav();
 }
@@ -139,20 +143,8 @@ function updateNav() {
   document.getElementById('bottomnav').style.display = state.currentStop ? 'none' : 'flex';
 }
 
-function stopRow(stop, { line = null, product = null, dist = true } = {}) {
-  const distHtml = dist && stop.distance != null ? `<span class="dist">${stop.distance} m</span>` : '';
-  const lineHtml = line
-    ? `<span class="line-badge sm ${productInfo(product).cls}">${esc(line)}</span>`
-    : '';
-  return `<button class="stop-row" data-stop-id="${esc(stop.id)}" data-stop-name="${esc(stop.name)}" data-line="${esc(line || '')}">
-    <span class="stop-name">${esc(cleanName(stop.name))}</span>
-    ${distHtml}${lineHtml}
-    <span class="chev">›</span>
-  </button>`;
-}
-
 // ---- 固定路牌三个栏:
-//   home) U Breitenbachplatz 本站发车表(只看指定几路车;282 只看往 Dardanellenweg)
+//   home) Board:U Breitenbachplatz 本站发车表(只看指定几路车;282 只看往 Dardanellenweg)
 //   s282) U Schloßstr. 往 Breitenbachplatz 的 282 时刻 + 整条线上车开到哪了
 //   go)   按定位:从当前位置去 U Breitenbachplatz 的公交/地铁方案(按线路组合可选)
 const HOME_PRODUCTS = ['subway', 'bus']; // 只坐公交和地铁
@@ -181,14 +173,16 @@ function scheduleTab(tab, reload, paint, refreshMs) {
   state.tickTimer = setInterval(() => onTab(tab) && paint(), 10000);
 }
 
-// ---- Home:U Breitenbachplatz 发车 ----
+// ---- Board:U Breitenbachplatz 发车 ----
 function renderHome() {
   tabHeader(PINNED.name, loadPinned);
   const pinLines = PINNED.lines.map((l) => (PINNED.dirs[l] ? l + '(往 Dardanellenweg)' : l)).join(' · ');
   app.innerHTML = `
     <div class="tab-sub">${esc(pinLines)}</div>
     <div id="pin-status" class="pin-status"></div>
+    <div id="pin-alerts" class="alerts"></div>
     <div id="pin-list" class="dep-list"><div class="loading">加载中…</div></div>`;
+  paintAlerts('pin-alerts', state.homeAlerts);
   if (state.pinnedDeps.length) paintPinned();
   loadPinned(); // 内部会先用缓存秒开
   scheduleTab('home', loadPinned, paintPinned, 30000);
@@ -200,9 +194,11 @@ function render282() {
   app.innerHTML = `
     <div class="tab-sub">往 U Breitenbachplatz 方向</div>
     <div id="s282-status" class="pin-status"></div>
+    <div id="s282-alerts" class="alerts"></div>
     <div id="s282-list" class="dep-list"><div class="loading">加载中…</div></div>
     <div id="s282-map"></div>`;
   if (!state.s282.deps.length) state.s282.deps = getCachedDepartures('s282') || [];
+  paintAlerts('s282-alerts', state.s282Alerts);
   if (state.s282.deps.length) paint282();
   load282();
   scheduleTab('s282', load282, paint282, 30000);
@@ -250,8 +246,12 @@ async function resolveStopId(key, query, re) {
   return stop;
 }
 
+// 发车时间:实时优先;取消的班次没有实时时间,用计划时间
+const depWhen = (d) => d.when || d.plannedWhen;
+const byWhen = (a, b) => new Date(depWhen(a) || 0) - new Date(depWhen(b) || 0);
+
 const upcoming = (d) => {
-  const m = minutesUntil(d.when);
+  const m = minutesUntil(depWhen(d));
   return m === null || m >= 0;
 };
 
@@ -260,7 +260,7 @@ async function load282() {
     const stop = await resolveStopId(S282.key, S282.query, S282.match);
     let deps;
     try {
-      deps = await departures(stop.id, { duration: 60, results: 30, products: ['bus'], timeout: 6000 });
+      deps = await departures(stop.id, { duration: 60, results: 30, products: ['bus'], remarks: true, timeout: 6000 });
     } catch (err) {
       // 缓存的 id 失效(404)→ 清掉重解析一次
       if (!/请求失败\(404\)/.test(err.message || '')) throw err;
@@ -274,12 +274,17 @@ async function load282() {
     paint282();
 
     // 追踪最近几班:拉每趟车的沿途站,推算它现在开到哪了
-    const next = list.filter(upcoming).filter((d) => d.tripId).slice(0, S282.track);
-    const trips = await Promise.all(next.map((d) => trip(d.tripId).catch(() => null)));
+    const next = list.filter(upcoming).filter((d) => d.tripId && !d.cancelled).slice(0, S282.track);
+    const trips = await Promise.all(next.map((d) => trip(d.tripId, { remarks: true }).catch(() => null)));
     if (!onTab('s282')) return;
     state.s282.tracked = next
       .map((dep, i) => ({ dep, trip: trips[i] }))
       .filter((x) => x.trip && Array.isArray(x.trip.stopovers) && x.trip.stopovers.length);
+    state.s282Alerts = mergeAlerts(
+      state.s282.tracked.flatMap(({ dep, trip: tr }) => tripWarnings(tr).map((r) => ({ r, line: dep.line.name }))),
+      /Schlo(ß|ss)str|Breitenbachplatz/i
+    );
+    paintAlerts('s282-alerts', state.s282Alerts);
     paint282();
     setStatus('s282-status', '已更新 · 柏林时间 ' + berlinClock());
   } catch (err) {
@@ -299,7 +304,7 @@ function paint282() {
   const listEl = document.getElementById('s282-list');
   const mapEl = document.getElementById('s282-map');
   if (!listEl || !mapEl) return;
-  const rows = state.s282.deps.filter(upcoming).sort((a, b) => new Date(a.when || 0) - new Date(b.when || 0));
+  const rows = state.s282.deps.filter(upcoming).sort(byWhen);
   listEl.innerHTML = rows.length
     ? rows.slice(0, 4).map(depRowHtml).join('')
     : emptyState('近期暂无从 ' + esc(S282.name) + ' 开往 Breitenbachplatz 的 282');
@@ -352,9 +357,9 @@ function routeMapHtml() {
     if (pos.kind === 'done') continue;
     const idx = baseIdx.get(stopKey(tr.stopovers[pos.idx]));
     if (idx == null) continue;
-    const min = minutesUntil(dep.when);
+    const min = minutesUntil(depWhen(dep));
     const label =
-      (pos.kind === 'wait' ? '起点待发 · ' : '') + berlinTime(dep.when) + ' 班 · ' + (min <= 0 ? '即将到' : min + ' 分后到') + ' Schloßstr.';
+      (pos.kind === 'wait' ? '起点待发 · ' : '') + berlinTime(depWhen(dep)) + ' 班 · ' + (min <= 0 ? '即将到' : min + ' 分后到') + ' Schloßstr.';
     markers.push({ idx, between: pos.kind === 'between', label });
   }
 
@@ -410,12 +415,12 @@ async function loadHomeRoutes() {
     }
     if (!onTab('go')) return;
 
-    // 人就在站边上:不用规划,提示去看 Home 的发车表
+    // 人就在站边上:不用规划,提示去看 Board 的发车表
     const dist = distanceM(coords, PINNED);
     if (dist <= NEAR_M) {
       document.getElementById('rt-chips').innerHTML = '';
       document.getElementById('rt-note').textContent = '';
-      if (listEl) listEl.innerHTML = emptyState('你就在 ' + esc(PINNED.name) + ' 附近(' + fmtDist(dist) + ')<br>发车时间看 Home 栏');
+      if (listEl) listEl.innerHTML = emptyState('你就在 ' + esc(PINNED.name) + ' 附近(' + fmtDist(dist) + ')<br>发车时间看 Board 栏');
       setStatus('rt-status', '柏林时间 ' + berlinClock());
       return;
     }
@@ -473,9 +478,9 @@ function journeyKey(j) {
 }
 
 // 还赶得上的方案(第一段车未开走),去重、按上车时间排序
-function upcomingJourneys() {
+function upcomingJourneys(list = state.homeJourneys) {
   const seen = new Set();
-  return (state.homeJourneys || [])
+  return (list || [])
     .filter((j) => j.legs && j.legs.length)
     .filter((j) => {
       const r = rides(j)[0];
@@ -618,7 +623,7 @@ function homeRowHtml(j) {
   </details>`;
 }
 
-// ---- Home 栏:U Breitenbachplatz 本站发车表(只看指定几路车)----
+// ---- Board 栏:U Breitenbachplatz 本站发车表(只看指定几路车)----
 function setPinStatus(text, warn = false) {
   const el = document.getElementById('pin-status');
   if (!el) return;
@@ -651,7 +656,7 @@ async function resolvePinnedByName(src) {
 
 // 拉取固定看板发车:只要地铁+公交、缩短时长/条数、6s 超时
 function fetchPinnedDeps(id, src) {
-  return departures(id, { duration: 30, results: 25, products: ['subway', 'bus'], timeout: 6000, src });
+  return departures(id, { duration: 30, results: 25, products: ['subway', 'bus'], remarks: true, timeout: 6000, src });
 }
 
 // 从某个源取发车(站点 id 按源解析并缓存;写死 id 仅 vbb 用;404 自愈)
@@ -712,6 +717,12 @@ async function loadPinned() {
     setPinnedStop('last', result.stop);
     paintPinned();
     setPinStatus('已更新 · 柏林时间 ' + berlinClock() + (result.src === 'db' ? ' · DB 源' : ''));
+    if (result.src === 'vbb') {
+      alertsFor(pinnedRows(), stopNameRe(PINNED.name)).then((list) => {
+        state.homeAlerts = list;
+        if (onTab('home')) paintAlerts('pin-alerts', list);
+      });
+    }
   } catch (err) {
     if (state.pinnedDeps.length) {
       setPinStatus('⚠ ' + (err.message || '刷新失败') + ',显示上次数据', true);
@@ -724,15 +735,20 @@ async function loadPinned() {
   }
 }
 
-function paintPinned() {
-  const listEl = document.getElementById('pin-list');
-  if (!listEl) return;
+// Board 要显示的车次:指定线路 + 指定方向 + 未开走
+function pinnedRows() {
   const allow = new Set(PINNED.lines);
-  const rows = state.pinnedDeps
+  return state.pinnedDeps
     .filter((d) => d.line && allow.has(d.line.name))
     .filter((d) => !PINNED.dirs[d.line.name] || PINNED.dirs[d.line.name].test(d.direction || ''))
     .filter(upcoming)
-    .sort((a, b) => new Date(a.when || 0) - new Date(b.when || 0));
+    .sort(byWhen);
+}
+
+function paintPinned() {
+  const listEl = document.getElementById('pin-list');
+  if (!listEl) return;
+  const rows = pinnedRows();
 
   if (!rows.length) {
     listEl.innerHTML = emptyState('近期暂无这几路车(' + PINNED.lines.join('、') + ')的班次');
@@ -744,7 +760,7 @@ function paintPinned() {
 // 单条发车行(倒计时 + 柏林当地到达时间),供固定看板与站点详情共用
 function depRowHtml(d) {
   const p = productInfo(d.line && d.line.product);
-  const min = minutesUntil(d.when);
+  const min = minutesUntil(depWhen(d));
   const delay = d.delay; // 秒
   let delayTag = '';
   if (delay != null && Math.abs(delay) >= 60) {
@@ -753,8 +769,15 @@ function depRowHtml(d) {
   } else if (delay != null) {
     delayTag = `<span class="delay ontime">准点</span>`;
   }
-  const cancelled = d.cancelled ? `<span class="delay late">已取消</span>` : '';
-  const time = berlinTime(d.when);
+  const codes = (d.remarks || []).filter((r) => r.type === 'status').map((r) => r.code || '');
+  const cancelled = d.cancelled
+    ? `<span class="delay late">已取消</span>`
+    : codes.some((c) => /stop\.cancelled/.test(c))
+    ? `<span class="delay late">本站不停</span>`
+    : codes.some((c) => /partially\.cancelled/.test(c))
+    ? `<span class="delay late">部分站不停</span>`
+    : '';
+  const time = berlinTime(depWhen(d));
   const cd = countdownText(min);
   const urgent = min !== null && min <= 2 ? 'urgent' : '';
   return `<div class="dep-row ${d.cancelled ? 'cancelled' : ''}">
@@ -783,159 +806,12 @@ function getPosition() {
   });
 }
 
-// ---- 路线:从我的位置到某个地点怎么坐车 ----
-function renderRoute() {
-  const h = document.getElementById('header');
-  h.innerHTML = `
-    <span class="hspace"></span>
-    <h1 class="htitle">路线</h1>
-    <button id="refresh-btn" class="hbtn">⟳</button>`;
-  document.getElementById('refresh-btn').onclick = () => {
-    if (!state.routeDest) return;
-    const b = document.getElementById('refresh-btn');
-    b.classList.add('spin');
-    planRoute().finally(() => setTimeout(() => b.classList.remove('spin'), 500));
-  };
-  app.innerHTML = `
-    <div class="search-wrap">
-      <input id="route-input" class="search-input" type="search"
-        placeholder="去哪儿?输入站点或地址" autocomplete="off" value="${esc(state._routeQuery || '')}">
-    </div>
-    <div id="route-results" class="list"></div>
-    <div id="route-journeys" class="jn-list"></div>`;
-
-  const input = document.getElementById('route-input');
-  const results = document.getElementById('route-results');
-  let timer;
-  input.addEventListener('input', () => {
-    state._routeQuery = input.value;
-    state.routeDest = null; // 改了输入 → 目的地作废
-    state.routeJourneys = [];
-    document.getElementById('route-journeys').innerHTML = '';
-    clearTimeout(timer);
-    const q = input.value.trim();
-    if (q.length < 2) {
-      results.innerHTML = '';
-      return;
-    }
-    results.innerHTML = `<div class="loading">搜索中…</div>`;
-    timer = setTimeout(async () => {
-      try {
-        const items = await searchStops(q, { addresses: true, poi: true, results: 8 });
-        state._routeSearch = items;
-        results.innerHTML = items.length
-          ? items.map((s, i) => routeResultRow(s, i)).join('')
-          : emptyState('没有找到匹配的地点');
-        bindRouteResults();
-      } catch (err) {
-        results.innerHTML = errorState('搜索失败:' + (err.message || ''));
-      }
-    }, 350);
-  });
-
-  // 回到该栏时:已选目的地 → 重新规划(刷新出发时间);否则若有历史输入则触发搜索
-  if (state.routeDest) {
-    planRoute();
-  } else if ((state._routeQuery || '').trim().length >= 2) {
-    input.dispatchEvent(new Event('input'));
-  } else {
-    input.focus();
-  }
-}
-
-// 目的地显示名(站点用 name,地址用 address)
-function placeLabel(item) {
-  return cleanName(item.name || item.address || '');
-}
-
-// 搜索结果 → 路线目的地(站点用 id;地址/兴趣点用坐标)
-function toPlace(item) {
-  if (item.type === 'location' && item.latitude != null && item.longitude != null) {
-    return { latitude: item.latitude, longitude: item.longitude, address: placeLabel(item) };
-  }
-  return item.id;
-}
-
-function routeResultRow(item, i) {
-  const isStop = item.type !== 'location';
-  return `<button class="stop-row" data-idx="${i}">
-    <span class="stop-ico">${isStop ? '🚏' : '📍'}</span>
-    <span class="stop-name">${esc(placeLabel(item))}</span>
-    <span class="chev">›</span>
-  </button>`;
-}
-
-function bindRouteResults() {
-  document.querySelectorAll('#route-results .stop-row').forEach((row) => {
-    row.onclick = () => {
-      const item = state._routeSearch[+row.dataset.idx];
-      if (!item) return;
-      state.routeDest = { to: toPlace(item), label: placeLabel(item) };
-      state._routeQuery = state.routeDest.label;
-      const input = document.getElementById('route-input');
-      if (input) {
-        input.value = state.routeDest.label;
-        input.blur();
-      }
-      document.getElementById('route-results').innerHTML = '';
-      planRoute();
-    };
-  });
-}
-
-async function planRoute() {
-  const el = document.getElementById('route-journeys');
-  if (!el || !state.routeDest) return;
-  el.innerHTML = `<div class="loading">定位并规划路线…</div>`;
-  try {
-    const coords = state.coords || (await getPosition());
-    state.coords = coords;
-    if (state.tab !== 'route' || !state.routeDest) return;
-    const from = { latitude: coords.latitude, longitude: coords.longitude, address: '我的位置' };
-    const list = await journeys(from, state.routeDest.to, { results: 4 });
-    if (state.tab !== 'route' || !state.routeDest) return;
-    state.routeJourneys = list;
-    paintJourneys();
-  } catch (err) {
-    if (state.tab === 'route' && state.routeDest && el) {
-      el.innerHTML = errorState('规划失败:' + (err.message || ''), planRoute);
-    }
-  }
-}
-
-function paintJourneys() {
-  const el = document.getElementById('route-journeys');
-  if (!el) return;
-  const rows = (state.routeJourneys || []).filter((j) => j.legs && j.legs.length);
-  el.innerHTML = rows.length
-    ? `<div class="jn-dest">→ ${esc(state.routeDest.label)}</div>` + rows.map(journeyCard).join('')
-    : emptyState('没找到合适的换乘方案');
-}
-
 // 一条 leg 的分钟数(到达 - 出发)
 function legMinutes(leg) {
   const a = leg.departure || leg.plannedDeparture;
   const b = leg.arrival || leg.plannedArrival;
   if (!a || !b) return null;
   return Math.max(0, Math.round((new Date(b) - new Date(a)) / 60000));
-}
-
-function journeyCard(j) {
-  const legs = j.legs;
-  const dep = legs[0].departure || legs[0].plannedDeparture;
-  const arr = legs[legs.length - 1].arrival || legs[legs.length - 1].plannedArrival;
-  const durMin = dep && arr ? Math.round((new Date(arr) - new Date(dep)) / 60000) : null;
-  const transfers = Math.max(0, legs.filter((l) => l.line).length - 1);
-  const leaveIn = minutesUntil(dep);
-  const leaveTxt = leaveIn === null ? '' : leaveIn <= 0 ? '现在出发' : leaveIn + ' 分钟后出发';
-  return `<div class="jn-card">
-    <div class="jn-head">
-      <span class="jn-when">${esc(berlinTime(dep))} → ${esc(berlinTime(arr))}</span>
-      <span class="jn-dur">${durMin != null ? '约 ' + durMin + ' 分钟' : ''}${transfers ? ' · 换乘 ' + transfers + ' 次' : ' · 直达'}</span>
-      <span class="jn-meta">${esc(leaveTxt)}</span>
-    </div>
-    <div class="jn-legs">${legs.map(legHtml).join('')}</div>
-  </div>`;
 }
 
 function legHtml(leg) {
@@ -964,20 +840,174 @@ function legHtml(leg) {
   </div>`;
 }
 
-// ---- 搜索 ----
-function renderSearch() {
-  setHeader('搜索站点');
+// ---------- 运营提示:停运 / 绕行 / 施工 ----------
+const ALERT_TTL = 120000; // 整条线的提示 2 分钟刷一次就够
+const ALERT_NOISE = /elevator|\blift\b|aufzug|escalator|fahrtreppe|rolltreppe/i; // 电梯维修之类不打扰
+// 影响小的(站点挪了几十米等):只有提到你用的站时才显示
+const ALERT_MINOR = /moved stop|stop moved/i;
+const ALERT_ZH = {
+  Diversion: '绕行',
+  'Moved Stop': '站点迁移',
+  Disruption: '运营故障',
+  'Construction work': '施工',
+  'Construction works': '施工',
+  Cancellation: '停运',
+  'Stop moved': '站点临时迁移',
+  'Replacement service': '替代交通',
+  'Rail replacement service': '替代巴士',
+  Delays: '延误',
+};
+
+function decodeEntities(str) {
+  const t = document.createElement('textarea');
+  t.innerHTML = str || '';
+  return t.value;
+}
+
+// 一趟车带的运营提示(不带沿途站时在 trip.remarks,带沿途站时散在各站)
+function tripWarnings(tr) {
+  if (!tr) return [];
+  return [...(tr.remarks || []), ...(tr.stopovers || []).flatMap((so) => so.remarks || [])].filter((r) => r.type === 'warning');
+}
+
+// [{ r, line }] → 去重合并,过滤电梯类、已过期的,以及与 stopRe 无关的小提示
+function mergeAlerts(items, stopRe = null) {
+  const map = new Map();
+  for (const { r, line } of items) {
+    const summary = decodeEntities(r.summary);
+    const text = decodeEntities(r.text);
+    if (ALERT_NOISE.test(summary + ' ' + text)) continue;
+    if (ALERT_MINOR.test(summary) && !(stopRe && stopRe.test(text))) continue;
+    if (r.validUntil && new Date(r.validUntil).getTime() < Date.now()) continue;
+    const key = String(r.id || summary + '|' + text);
+    const a = map.get(key) || { key, summary, text, validUntil: r.validUntil, priority: r.priority || 0, lines: new Set() };
+    a.lines.add(line);
+    map.set(key, a);
+  }
+  return [...map.values()].sort((a, b) => b.priority - a.priority);
+}
+
+// 每条「线路 + 方向」取最近一班车,拉整趟车的提示(只要提示、不要沿途站,很轻)
+async function alertsFor(deps, stopRe = null) {
+  const firsts = new Map();
+  for (const d of deps) {
+    if (!d.line || !d.tripId || !upcoming(d)) continue;
+    const k = d.line.name + '|' + (d.direction || '');
+    if (!firsts.has(k)) firsts.set(k, d);
+  }
+  const items = [];
+  await Promise.all(
+    [...firsts].map(async ([k, d]) => {
+      let c = state.alertCache[k];
+      if (!c || Date.now() - c.ts > ALERT_TTL) {
+        try {
+          c = { ts: Date.now(), list: tripWarnings(await trip(d.tripId, { stopovers: false, remarks: true })) };
+          state.alertCache[k] = c;
+        } catch {
+          c = c || { ts: 0, list: [] };
+        }
+      }
+      for (const r of c.list) items.push({ r, line: d.line.name });
+    })
+  );
+  return mergeAlerts(items, stopRe);
+}
+
+// 站名 → 在提示正文里匹配它的正则(去掉 "U " / "(Berlin)" 等前后缀)
+function stopNameRe(name) {
+  const core = cleanName(name).replace(/^(S\+U|U|S)\s+/, '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return core ? new RegExp(core, 'i') : null;
+}
+
+function berlinDate(iso) {
+  try {
+    return new Date(iso).toLocaleDateString('zh-CN', { timeZone: 'Europe/Berlin', month: 'long', day: 'numeric' });
+  } catch {
+    return '';
+  }
+}
+
+function alertsHtml(alerts) {
+  return (alerts || [])
+    .map(
+      (a) => `<details class="alert" data-key="${esc(a.key)}" ${state.alertOpen.has(a.key) ? 'open' : ''}>
+    <summary>
+      <span class="alert-ico">⚠</span>
+      <span class="alert-lines">${esc([...a.lines].join(' · '))}</span>
+      <span class="alert-sum">${esc(ALERT_ZH[a.summary] || a.summary || '运营提示')}</span>
+      <span class="alert-peek">${esc(a.text)}</span>
+    </summary>
+    <div class="alert-text">${esc(a.text)}${
+        a.validUntil ? `<div class="alert-until">预计持续到 ${esc(berlinDate(a.validUntil))}</div>` : ''
+      }</div>
+  </details>`
+    )
+    .join('');
+}
+
+// 记住 <details> 的展开状态(定时重画后不收起)
+function bindDetails(root) {
+  root.querySelectorAll('details.alert').forEach((d) =>
+    d.addEventListener('toggle', () => (d.open ? state.alertOpen.add(d.dataset.key) : state.alertOpen.delete(d.dataset.key)))
+  );
+  root.querySelectorAll('details.rt-item').forEach((d) =>
+    d.addEventListener('toggle', () => (d.open ? state.rtOpen.add(d.dataset.key) : state.rtOpen.delete(d.dataset.key)))
+  );
+}
+
+function paintAlerts(id, alerts) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.innerHTML = alertsHtml(alerts);
+  bindDetails(el);
+}
+
+// ---- 常去:自己做的站牌卡 + 目的地卡 ----
+
+// 同一轮刷新里多张目的地卡共用一次定位
+let posJob = null;
+function currentPosition() {
+  if (!posJob) {
+    posJob = getPosition()
+      .then((c) => (state.coords = c))
+      .catch((e) => {
+        if (state.coords) return state.coords;
+        throw e;
+      })
+      .finally(() => setTimeout(() => (posJob = null), 20000));
+  }
+  return posJob;
+}
+
+function renderSaved() {
+  const h = document.getElementById('header');
+  h.innerHTML = `
+    <button id="sv-edit" class="hbtn hbtn-text">${state.svEdit ? '完成' : '编辑'}</button>
+    <h1 class="htitle">常去</h1>
+    <button id="refresh-btn" class="hbtn">⟳</button>`;
+  document.getElementById('sv-edit').onclick = () => {
+    state.svEdit = !state.svEdit;
+    renderSaved();
+  };
+  document.getElementById('refresh-btn').onclick = () => {
+    const b = document.getElementById('refresh-btn');
+    b.classList.add('spin');
+    loadSaved(true).finally(() => setTimeout(() => b.classList.remove('spin'), 500));
+  };
   app.innerHTML = `
     <div class="search-wrap">
-      <input id="search-input" class="search-input" type="search"
-        placeholder="输入站名,如 Alexanderplatz" autocomplete="off" value="${esc(state._lastQuery || '')}">
+      <input id="sv-input" class="search-input" type="search" autocomplete="off"
+        placeholder="添加:搜站点做站牌,搜地址做目的地" value="${esc(state.svQuery)}">
     </div>
-    <div id="search-results" class="list"></div>`;
-  const input = document.getElementById('search-input');
-  const results = document.getElementById('search-results');
+    <div id="sv-results" class="list"></div>
+    <div id="sv-add"></div>
+    <div id="sv-cards" class="sv-cards"></div>`;
+
+  const input = document.getElementById('sv-input');
+  const results = document.getElementById('sv-results');
   let timer;
   input.addEventListener('input', () => {
-    state._lastQuery = input.value;
+    state.svQuery = input.value;
     clearTimeout(timer);
     const q = input.value.trim();
     if (q.length < 2) {
@@ -987,43 +1017,365 @@ function renderSearch() {
     results.innerHTML = `<div class="loading">搜索中…</div>`;
     timer = setTimeout(async () => {
       try {
-        const stops = await searchStops(q);
-        results.innerHTML = stops.length
-          ? stops.map((s) => stopRow(s)).join('')
-          : emptyState('没有找到匹配的站点');
-        bindStopRows();
+        const found = await searchStops(q, { addresses: true, poi: true, results: 12 });
+        if (input.value.trim() !== q) return;
+        // 柏林市内的排前面(VBB 也覆盖勃兰登堡,同名街道常常排在前面)
+        const inBerlin = (x) => /Berlin/.test(x.name || x.address || '');
+        const items = [...found.filter(inBerlin), ...found.filter((x) => !inBerlin(x))].slice(0, 8);
+        state.svSearch = items;
+        results.innerHTML = items.length ? items.map((s, i) => routeResultRow(s, i)).join('') : emptyState('没有找到匹配的站点或地址');
+        results.querySelectorAll('.stop-row').forEach((row) => {
+          row.onclick = () => startAdd(state.svSearch[+row.dataset.idx]);
+        });
       } catch (err) {
-        results.innerHTML = errorState('搜索失败:' + (err.message || ''));
+        results.innerHTML = errorState('搜索失败:' + esc(err.message || ''));
       }
     }, 350);
   });
-  input.focus();
-  if ((state._lastQuery || '').trim().length >= 2) {
-    input.dispatchEvent(new Event('input'));
+
+  // 卡片上的按钮统一在容器上处理
+  document.getElementById('sv-cards').onclick = (e) => {
+    const el = e.target.closest('[data-act]');
+    if (!el) return;
+    const list = getSaved();
+    const i = list.findIndex((c) => c.id === el.dataset.id);
+    if (i < 0) return;
+    const c = list[i];
+    const act = el.dataset.act;
+    if (act === 'up' || act === 'down') {
+      const j = act === 'up' ? i - 1 : i + 1;
+      if (j < 0 || j >= list.length) return;
+      [list[i], list[j]] = [list[j], list[i]];
+      setSaved(list);
+      paintSavedCards();
+    } else if (act === 'del') {
+      if (!confirm('删除「' + cardTitle(c) + '」?')) return;
+      list.splice(i, 1);
+      setSaved(list);
+      delete state.svData[c.id];
+      paintSavedCards();
+    } else if (act === 'open-stop' && !state.svEdit) {
+      state.currentStop = { id: c.stopId, name: c.stopName };
+      state.lineFilter = c.line;
+      state.deps = [];
+      stopTimers();
+      render();
+    } else if (act === 'toggle-place') {
+      if (state.svOpen.has(c.id)) state.svOpen.delete(c.id);
+      else state.svOpen.add(c.id);
+      paintCard(c);
+    }
+  };
+
+  paintAddPanel();
+  paintSavedCards();
+  loadSaved();
+  scheduleTab('saved', () => loadSaved(), paintSavedCards, 30000);
+}
+
+function cardTitle(c) {
+  return c.kind === 'stop' ? cleanName(c.stopName) + (c.line ? ' · ' + c.line : '') : c.label;
+}
+
+// ---- 添加卡片 ----
+function startAdd(item) {
+  if (!item) return;
+  document.getElementById('sv-results').innerHTML = '';
+  const isStop = item.type !== 'location';
+  if (isStop) {
+    state.svAdd = { kind: 'stop', stop: { id: item.id, name: item.name }, deps: null, err: null, line: null, dir: null };
+    paintAddPanel();
+    departures(item.id, { duration: 120, results: 120 })
+      .then((deps) => {
+        if (state.svAdd && state.svAdd.stop.id === item.id) state.svAdd.deps = deps;
+      })
+      .catch((err) => {
+        if (state.svAdd && state.svAdd.stop.id === item.id) state.svAdd.err = err.message || '加载失败';
+      })
+      .finally(() => onTab('saved') && paintAddPanel());
+  } else {
+    state.svAdd = { kind: 'place', item, label: placeLabel(item) };
+    paintAddPanel();
   }
 }
 
-// ---- 收藏 ----
-function renderFavorites() {
-  setHeader('收藏');
-  const favs = getFavorites();
-  if (!favs.length) {
-    app.innerHTML = emptyState(
-      '还没有收藏。<br>进入站点后点右上角 ☆ 收藏整站;<br>先选一条线路再点 ☆,即可收藏「站点+该线路」。'
-    );
+function paintAddPanel() {
+  const el = document.getElementById('sv-add');
+  if (!el) return;
+  const a = state.svAdd;
+  if (!a) {
+    el.innerHTML = '';
     return;
   }
-  app.innerHTML = `<div class="list">${favs
-    .map((f) => stopRow(f, { line: f.line, product: f.product, dist: false }))
-    .join('')}</div>`;
-  bindStopRows();
+  if (a.kind === 'place') {
+    el.innerHTML = `<div class="sv-addbox">
+      <div class="sv-add-title">📍 ${esc(a.label)}</div>
+      <div class="sv-add-label">起个名字</div>
+      <input id="sv-name" class="search-input" value="${esc(a.label)}" placeholder="如 公司、学校">
+      <div class="sv-add-actions">
+        <button id="sv-save" class="btn-primary">添加目的地</button>
+        <button id="sv-cancel" class="btn-ghost">取消</button>
+      </div>
+    </div>`;
+  } else {
+    let body;
+    if (a.err) body = `<div class="sv-add-msg warn">加载该站线路失败:${esc(a.err)}</div>`;
+    else if (!a.deps) body = `<div class="sv-add-msg">加载该站的线路…</div>`;
+    else {
+      const lines = [];
+      for (const d of a.deps) if (d.line && !lines.some((l) => l.name === d.line.name)) lines.push(d.line);
+      const dirs = a.line
+        ? [...new Set(a.deps.filter((d) => d.line && d.line.name === a.line).map((d) => d.direction).filter(Boolean))]
+        : [];
+      body = `
+        <div class="sv-add-label">选线路</div>
+        <div class="chip-wrap">
+          <button class="chip ${a.line ? '' : 'chip-on'}" data-line="">整站全部</button>
+          ${lines
+            .map(
+              (l) => `<button class="chip ${a.line === l.name ? 'chip-on' : ''}" data-line="${esc(l.name)}" data-product="${esc(l.product || '')}">${esc(l.name)}</button>`
+            )
+            .join('')}
+        </div>
+        ${
+          a.line
+            ? `<div class="sv-add-label">选方向</div>
+        <div class="chip-wrap">
+          <button class="chip ${a.dir ? '' : 'chip-on'}" data-dir="">两个方向</button>
+          ${dirs.map((d) => `<button class="chip ${a.dir === d ? 'chip-on' : ''}" data-dir="${esc(d)}">→ ${esc(cleanName(d))}</button>`).join('')}
+        </div>`
+            : ''
+        }`;
+    }
+    el.innerHTML = `<div class="sv-addbox">
+      <div class="sv-add-title">🚏 ${esc(cleanName(a.stop.name))}</div>
+      ${body}
+      <div class="sv-add-actions">
+        <button id="sv-save" class="btn-primary" ${a.deps ? '' : 'disabled'}>添加站牌</button>
+        <button id="sv-as-place" class="btn-ghost">改成目的地</button>
+        <button id="sv-cancel" class="btn-ghost">取消</button>
+      </div>
+    </div>`;
+    el.querySelectorAll('[data-line]').forEach((b) => {
+      b.onclick = () => {
+        a.line = b.dataset.line || null;
+        a.product = b.dataset.product || null;
+        a.dir = null;
+        paintAddPanel();
+      };
+    });
+    el.querySelectorAll('[data-dir]').forEach((b) => {
+      b.onclick = () => {
+        a.dir = b.dataset.dir || null;
+        paintAddPanel();
+      };
+    });
+    const asPlace = document.getElementById('sv-as-place');
+    if (asPlace)
+      asPlace.onclick = () => {
+        state.svAdd = { kind: 'place', item: { type: 'stop', id: a.stop.id, name: a.stop.name }, label: cleanName(a.stop.name) };
+        paintAddPanel();
+      };
+  }
+  document.getElementById('sv-cancel').onclick = () => {
+    state.svAdd = null;
+    paintAddPanel();
+  };
+  document.getElementById('sv-save').onclick = () => {
+    let card;
+    if (a.kind === 'place') {
+      const name = (document.getElementById('sv-name').value || '').trim() || a.label;
+      card = { id: newCardId(), kind: 'place', label: name, to: toPlace(a.item) };
+    } else {
+      card = { id: newCardId(), kind: 'stop', stopId: a.stop.id, stopName: a.stop.name, line: a.line, product: a.line ? a.product : null, dir: a.dir };
+    }
+    setSaved([...getSaved(), card]);
+    state.svAdd = null;
+    state.svQuery = '';
+    const input = document.getElementById('sv-input');
+    if (input) input.value = '';
+    paintAddPanel();
+    paintSavedCards();
+    loadCard(card, true);
+    toast('已添加「' + cardTitle(card) + '」');
+  };
 }
+
+// ---- 卡片数据 ----
+function cardMatch(c, d) {
+  return (!c.line || (d.line && d.line.name === c.line)) && (!c.dir || d.direction === c.dir);
+}
+
+function loadSaved(force = false) {
+  return Promise.all(getSaved().map((c) => loadCard(c, force)));
+}
+
+async function loadCard(c, force = false) {
+  const data = state.svData[c.id] || (state.svData[c.id] = {});
+  try {
+    if (c.kind === 'stop') {
+      const deps = await departures(c.stopId, {
+        duration: 60,
+        results: 40,
+        remarks: true,
+        ...(c.line && c.product ? { products: [c.product] } : {}),
+      });
+      if (!onTab('saved')) return;
+      data.deps = deps.filter((d) => cardMatch(c, d));
+      data.err = null;
+      data.ts = Date.now();
+      setCachedDepartures('card:' + c.id, data.deps);
+      paintCard(c);
+      if (c.line) {
+        data.alerts = await alertsFor(data.deps, stopNameRe(c.stopName));
+        if (onTab('saved')) paintCard(c);
+      }
+    } else {
+      if (!force && data.ts && Date.now() - data.ts < 55000) return; // 路线 1 分钟刷一次就够
+      const coords = await currentPosition();
+      if (!onTab('saved')) return;
+      if (typeof c.to === 'object' && distanceM(coords, c.to) <= NEAR_M) {
+        data.near = true;
+      } else {
+        const me = { latitude: +coords.latitude.toFixed(4), longitude: +coords.longitude.toFixed(4), address: '我的位置' };
+        data.journeys = await journeys(me, c.to, { results: 5 });
+        data.near = false;
+      }
+      if (!onTab('saved')) return;
+      data.err = null;
+      data.ts = Date.now();
+      paintCard(c);
+    }
+  } catch (err) {
+    data.err = err.message || '加载失败';
+    if (onTab('saved')) paintCard(c);
+  }
+}
+
+// ---- 卡片渲染 ----
+function paintSavedCards() {
+  const el = document.getElementById('sv-cards');
+  if (!el) return;
+  const cards = getSaved();
+  el.innerHTML = cards.length
+    ? cards.map(cardHtml).join('')
+    : `<div class="empty sv-empty">还没有常去的卡片。在上面搜索:<br>
+        🚏 <b>搜站点</b> → 选线路和方向 → 做成自己的站牌<br>
+        📍 <b>搜地址</b> → 存成目的地,随时看从当前位置怎么去</div>`;
+  bindDetails(el);
+}
+
+function paintCard(c) {
+  const el = document.querySelector(`.sv-card[data-id="${c.id}"]`);
+  if (!el) return;
+  el.outerHTML = cardHtml(c);
+  const fresh = document.querySelector(`.sv-card[data-id="${c.id}"]`);
+  if (fresh) bindDetails(fresh);
+}
+
+function cardTools(c) {
+  if (!state.svEdit) return '';
+  return `<span class="sv-tools">
+    <button class="sv-tool" data-act="up" data-id="${c.id}">↑</button>
+    <button class="sv-tool" data-act="down" data-id="${c.id}">↓</button>
+    <button class="sv-tool sv-del" data-act="del" data-id="${c.id}">✕</button>
+  </span>`;
+}
+
+function cardHtml(c) {
+  const d = state.svData[c.id] || {};
+  if (c.kind === 'stop') return stopCardHtml(c, d);
+  return placeCardHtml(c, d);
+}
+
+function stopCardHtml(c, d) {
+  const badge = c.line
+    ? `<span class="line-badge sm ${productInfo(c.product).cls}">${esc(c.line)}</span>`
+    : `<span class="sv-ico">🚏</span>`;
+  const dirTxt = c.dir ? '→ ' + cleanName(c.dir) : c.line ? '两个方向' : '整站';
+  const deps = (d.deps || getCachedDepartures('card:' + c.id) || [])
+    .filter(upcoming)
+    .sort(byWhen);
+
+  let body;
+  if (!deps.length) {
+    body = `<div class="sv-msg ${d.err ? 'warn' : ''}">${d.err ? '⚠ ' + esc(d.err) : d.ts ? '近期没有班次' : '加载中…'}</div>`;
+  } else if (c.line && c.dir) {
+    // 单线路单方向:横排三个倒计时,像站牌
+    body = `<div class="sv-times">${deps
+      .slice(0, 3)
+      .map((x) => {
+        const m = minutesUntil(depWhen(x));
+        const late = x.delay != null && x.delay >= 60 ? ` <span class="sv-late">+${Math.round(x.delay / 60)}</span>` : '';
+        const off = x.cancelled ? ' sv-off' : '';
+        return `<span class="sv-t${off}"><b class="${m !== null && m <= 2 && !x.cancelled ? 'urgent' : ''}">${esc(x.cancelled ? '取消' : countdownText(m))}</b><small>${esc(berlinTime(depWhen(x)))}${late}</small></span>`;
+      })
+      .join('')}</div>`;
+  } else {
+    body = `<div class="sv-deps">${deps.slice(0, 4).map(depRowHtml).join('')}</div>`;
+  }
+  return `<div class="sv-card" data-id="${c.id}">
+    <div class="sv-head">${badge}<span class="sv-title">${esc(cleanName(c.stopName))}</span><span class="sv-dir">${esc(dirTxt)}</span>${cardTools(c)}</div>
+    <div class="sv-body" data-act="open-stop" data-id="${c.id}">${body}</div>
+    ${d.alerts && d.alerts.length ? `<div class="alerts sv-alerts">${alertsHtml(d.alerts)}</div>` : ''}
+  </div>`;
+}
+
+function placeCardHtml(c, d) {
+  const open = state.svOpen.has(c.id);
+  const rows = upcomingJourneys(d.journeys || []);
+  let body;
+  if (d.near) {
+    body = `<div class="sv-msg">你就在附近</div>`;
+  } else if (!rows.length) {
+    body = `<div class="sv-msg ${d.err ? 'warn' : ''}">${d.err ? '⚠ ' + esc(d.err) : d.ts ? '近期没有合适的方案' : '定位并规划中…'}</div>`;
+  } else {
+    const j = rows[0];
+    const leaveIn = minutesUntil(legDep(j.legs[0]));
+    const arr = berlinTime(legArr(j.legs[j.legs.length - 1]));
+    const dur = journeyMinutes(j);
+    const leave = leaveIn === null ? '' : leaveIn <= 0 ? '现在出门' : leaveIn + ' 分后出门';
+    body = `<div class="sv-best" data-act="toggle-place" data-id="${c.id}">
+        <span class="rt-badges">${sigBadges(j)}</span>
+        <span class="sv-best-mid"><b class="${leaveIn !== null && leaveIn <= 1 ? 'urgent' : ''}">${esc(leave)}</b>
+          <small>${esc(arr)} 到${dur != null ? ' · 约 ' + dur + ' 分' : ''}</small></span>
+        <span class="sv-more">${open ? '收起' : '更多 ' + rows.length}</span>
+      </div>
+      ${open ? `<div class="sv-jn">${rows.map(homeRowHtml).join('')}</div>` : ''}`;
+  }
+  return `<div class="sv-card" data-id="${c.id}">
+    <div class="sv-head"><span class="sv-ico">📍</span><span class="sv-title">${esc(c.label)}</span><span class="sv-dir">从当前位置</span>${cardTools(c)}</div>
+    <div class="sv-body">${body}</div>
+  </div>`;
+}
+
+// 目的地显示名(站点用 name,地址用 address)
+function placeLabel(item) {
+  return cleanName(item.name || item.address || '');
+}
+
+// 搜索结果 → 路线目的地(站点用 id;地址/兴趣点用坐标)
+function toPlace(item) {
+  if (item.type === 'location' && item.latitude != null && item.longitude != null) {
+    return { latitude: item.latitude, longitude: item.longitude, address: placeLabel(item) };
+  }
+  return item.id;
+}
+
+function routeResultRow(item, i) {
+  const isStop = item.type !== 'location';
+  return `<button class="stop-row" data-idx="${i}">
+    <span class="stop-ico">${isStop ? '🚏' : '📍'}</span>
+    <span class="stop-name">${esc(placeLabel(item))}</span>
+    <span class="chev">›</span>
+  </button>`;
+}
+
 
 // ---- 站点发车详情 ----
 function renderDeparturesView() {
   const stop = state.currentStop;
-  const fav = isFavorite(stop.id, state.lineFilter);
-  setHeader(cleanName(stop.name), true, fav);
+  setHeader(cleanName(stop.name), true);
   app.innerHTML = `
     <div id="filter-bar" class="filter-bar"></div>
     <div id="dep-list" class="dep-list"><div class="loading">加载发车信息…</div></div>`;
@@ -1047,7 +1399,7 @@ async function loadDepartures() {
   if (refreshBtn) refreshBtn.classList.add('spin');
 
   try {
-    const deps = await departures(stop.id);
+    const deps = await departures(stop.id, { remarks: true });
     if (!state.currentStop || state.currentStop.id !== stop.id) return; // 用户已离开该站
     state.deps = deps;
     setCachedDepartures(stop.id, deps);
@@ -1083,7 +1435,6 @@ function paintDepartures() {
     filterBar.querySelectorAll('.chip').forEach((c) => {
       c.onclick = () => {
         state.lineFilter = c.dataset.line || null;
-        updateFavButton(); // 收藏是「站点+线路」组合,切换线路后星标要同步
         paintDepartures();
       };
     });
@@ -1091,11 +1442,9 @@ function paintDepartures() {
     filterBar.innerHTML = '';
   }
 
-  updateFavButton();
-
   // 丢弃已过站的车次(尤其来自缓存的),只保留即将到站/未知时间的
   let rows = state.deps.filter((d) => {
-    const m = minutesUntil(d.when);
+    const m = minutesUntil(depWhen(d));
     return m === null || m >= 0;
   });
   if (state.lineFilter) rows = rows.filter((d) => d.line && d.line.name === state.lineFilter);
@@ -1125,17 +1474,12 @@ function stopTimers() {
 }
 
 // ---------- 头部 ----------
-function setHeader(title, back = false, fav = false) {
+function setHeader(title, back = false) {
   const h = document.getElementById('header');
   h.innerHTML = `
     ${back ? `<button id="back-btn" class="hbtn">‹</button>` : `<span class="hspace"></span>`}
     <h1 class="htitle">${esc(title)}</h1>
-    ${
-      back
-        ? `<button id="fav-btn" class="hbtn ${fav ? 'faved' : ''}">${fav ? '★' : '☆'}</button>
-           <button id="refresh-btn" class="hbtn">⟳</button>`
-        : `<span class="hspace"></span>`
-    }`;
+    ${back ? `<button id="refresh-btn" class="hbtn">⟳</button>` : `<span class="hspace"></span>`}`;
   const back_ = document.getElementById('back-btn');
   if (back_)
     back_.onclick = () => {
@@ -1145,54 +1489,12 @@ function setHeader(title, back = false, fav = false) {
       state.lineFilter = null;
       render();
     };
-  const favBtn = document.getElementById('fav-btn');
-  if (favBtn)
-    favBtn.onclick = () => {
-      // 找到当前线路的交通方式,收藏后徽章可显示对应配色
-      let product = null;
-      if (state.lineFilter) {
-        const d = state.deps.find((x) => x.line && x.line.name === state.lineFilter);
-        product = d && d.line ? d.line.product : null;
-      }
-      const nowFav = toggleFavorite({
-        id: state.currentStop.id,
-        name: state.currentStop.name,
-        line: state.lineFilter,
-        product,
-      });
-      favBtn.textContent = nowFav ? '★' : '☆';
-      favBtn.classList.toggle('faved', nowFav);
-      const target = state.lineFilter ? state.lineFilter + ' 线' : '整站';
-      toast(nowFav ? `已收藏(${target})` : `已取消收藏(${target})`);
-    };
   const refreshBtn = document.getElementById('refresh-btn');
   if (refreshBtn)
     refreshBtn.onclick = () => {
       refreshBtn.classList.add('spin');
       loadDepartures().finally(() => setTimeout(() => refreshBtn.classList.remove('spin'), 500));
     };
-}
-
-// ---------- 交互绑定 ----------
-function bindStopRows() {
-  document.querySelectorAll('.stop-row').forEach((row) => {
-    row.onclick = () => {
-      // 收藏行带 data-line 时自动应用该线路过滤;附近/搜索行无 line
-      state.lineFilter = row.dataset.line || null;
-      state.currentStop = { id: row.dataset.stopId, name: row.dataset.stopName };
-      state.deps = [];
-      render();
-    };
-  });
-}
-
-// 同步头部收藏星标为「当前站点 + 当前线路」组合的状态
-function updateFavButton() {
-  const btn = document.getElementById('fav-btn');
-  if (!btn || !state.currentStop) return;
-  const f = isFavorite(state.currentStop.id, state.lineFilter);
-  btn.textContent = f ? '★' : '☆';
-  btn.classList.toggle('faved', f);
 }
 
 // 轻提示
@@ -1244,6 +1546,7 @@ document.addEventListener('visibilitychange', () => {
   else if (state.tab === 'home') loadPinned();
   else if (state.tab === 's282') load282();
   else if (state.tab === 'go') loadHomeRoutes();
+  else if (state.tab === 'saved') loadSaved();
 });
 
 // 注册 Service Worker(离线壳)

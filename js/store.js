@@ -1,5 +1,4 @@
-// 本地存储:收藏(站点 + 可选线路)与发车缓存。
-const FAV_KEY = 'bvg.favorites.v1';
+// 本地存储:常去卡片、发车缓存、固定站点 id 等。
 const DEP_KEY = 'bvg.depcache.v1';
 
 function read(key) {
@@ -13,40 +12,37 @@ function write(key, val) {
   localStorage.setItem(key, JSON.stringify(val));
 }
 
-// ---------- 收藏 ----------
-// 每条收藏 = { id, name, line|null, product|null }
-// line 为 null 表示收藏整站;否则表示「该站的某条线路」。
-export function getFavorites() {
-  return read(FAV_KEY) || [];
+// ---------- 常去 ----------
+// 卡片两种:
+//   站牌 { id, kind: 'stop', stopId, stopName, line|null, product|null, dir|null }(line/dir 为 null = 不限)
+//   目的地 { id, kind: 'place', label, to }(to = 站点 id,或 { latitude, longitude, address })
+const SAVED_KEY = 'bvg.saved.v1';
+const OLD_FAV_KEY = 'bvg.favorites.v1';
+
+export function newCardId() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 }
 
-function sameFav(f, id, line) {
-  return f.id === id && (f.line || null) === (line || null);
-}
-
-export function isFavorite(id, line = null) {
-  return getFavorites().some((f) => sameFav(f, id, line));
-}
-
-// 收藏 / 取消收藏(按 站点+线路 组合),返回收藏后的状态
-export function toggleFavorite({ id, name, line = null, product = null }) {
-  const list = getFavorites();
-  const idx = list.findIndex((f) => sameFav(f, id, line));
-  if (idx >= 0) {
-    list.splice(idx, 1);
-    write(FAV_KEY, list);
-    return false;
+export function getSaved() {
+  let list = read(SAVED_KEY);
+  if (!Array.isArray(list)) {
+    // 首次:把旧「收藏」迁移成站牌卡
+    list = (read(OLD_FAV_KEY) || []).map((f) => ({
+      id: newCardId(),
+      kind: 'stop',
+      stopId: f.id,
+      stopName: f.name,
+      line: f.line || null,
+      product: f.product || null,
+      dir: null,
+    }));
+    write(SAVED_KEY, list);
   }
-  list.push({ id, name, line: line || null, product: product || null });
-  write(FAV_KEY, list);
-  return true;
+  return list;
 }
 
-export function removeFavorite(id, line = null) {
-  write(
-    FAV_KEY,
-    getFavorites().filter((f) => !sameFav(f, id, line))
-  );
+export function setSaved(list) {
+  write(SAVED_KEY, list);
 }
 
 // ---------- 固定站点 ID 解析缓存 ----------
