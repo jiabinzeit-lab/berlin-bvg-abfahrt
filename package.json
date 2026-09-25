@@ -1,0 +1,9 @@
+{
+  "name": "berlin-bvg-abfahrt",
+  "private": true,
+  "type": "module",
+  "description": "柏林公交看板 PWA;依赖仅供 Netlify 函数(netlify/functions/proxy.mjs)使用",
+  "dependencies": {
+    "hafas-client": "^6.3.6"
+  }
+}

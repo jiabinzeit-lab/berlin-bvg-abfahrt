@@ -29,8 +29,8 @@ const PINNED = {
   id: '900051202', // 写死站点 ID(U Breitenbachplatz),省掉首次解析请求 → 更快
   query: 'Breitenbachplatz', // 备用:若 id 缺失则按站名解析
   name: 'U Breitenbachplatz',
-  latitude: 52.46694, // 站点坐标:算距离;DB 源(id 不通用)按坐标规划路线
-  longitude: 13.30889,
+  latitude: 52.467339, // 站点坐标:算距离;DB 源(id 不通用)按坐标规划路线
+  longitude: 13.309276,
   lines: ['282', '101', '248', 'U3', '186'], // 只看这几路
   dirs: { 282: /Dardanellenweg/i }, // 这些线路只看指定方向(282 只看往 Dardanellenweg)
 };
