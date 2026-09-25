@@ -997,7 +997,7 @@ function renderSaved() {
   app.innerHTML = `
     <div class="search-wrap">
       <input id="sv-input" class="search-input" type="search" autocomplete="off"
-        placeholder="添加:搜站点做站牌,搜地址做目的地" value="${esc(state.svQuery)}">
+        placeholder="添加:搜地址存成「xx家」,或搜站点做站牌" value="${esc(state.svQuery)}">
     </div>
     <div id="sv-results" class="list"></div>
     <div id="sv-add"></div>
@@ -1064,6 +1064,16 @@ function renderSaved() {
       if (state.svOpen.has(c.id)) state.svOpen.delete(c.id);
       else state.svOpen.add(c.id);
       paintCard(c);
+    } else if (act === 'rename') {
+      const name = prompt('给这张卡起个名字(如 小王家、公司)', cardTitle(c));
+      if (name == null) return;
+      c.label = name.trim() || (c.kind === 'stop' ? null : c.label);
+      setSaved(list);
+      paintCard(c);
+    } else if (act === 'route') {
+      c.routeSel = el.dataset.sig || null;
+      setSaved(list);
+      paintCard(c);
     }
   };
 
@@ -1074,7 +1084,8 @@ function renderSaved() {
 }
 
 function cardTitle(c) {
-  return c.kind === 'stop' ? cleanName(c.stopName) + (c.line ? ' · ' + c.line : '') : c.label;
+  if (c.kind === 'stop') return c.label || cleanName(c.stopName) + (c.line ? ' · ' + c.line : '');
+  return c.label;
 }
 
 // ---- 添加卡片 ----
@@ -1238,7 +1249,7 @@ async function loadCard(c, force = false) {
         data.near = true;
       } else {
         const me = { latitude: +coords.latitude.toFixed(4), longitude: +coords.longitude.toFixed(4), address: '我的位置' };
-        data.journeys = await journeys(me, c.to, { results: 5 });
+        data.journeys = await journeys(me, c.to, { results: 6 });
         data.near = false;
       }
       if (!onTab('saved')) return;
@@ -1261,13 +1272,14 @@ function paintSavedCards() {
     ? cards.map(cardHtml).join('')
     : `<div class="empty sv-empty">还没有常去的卡片。在上面搜索:<br>
         🚏 <b>搜站点</b> → 选线路和方向 → 做成自己的站牌<br>
-        📍 <b>搜地址</b> → 存成目的地,随时看从当前位置怎么去</div>`;
+        🏠 <b>搜地址</b> → 起名如「小王家」→ 随时看从当前位置怎么去</div>`;
   bindDetails(el);
 }
 
-function paintCard(c) {
-  const el = document.querySelector(`.sv-card[data-id="${c.id}"]`);
-  if (!el) return;
+function paintCard(card) {
+  const c = getSaved().find((x) => x.id === card.id);
+  const el = document.querySelector(`.sv-card[data-id="${card.id}"]`);
+  if (!c || !el) return;
   el.outerHTML = cardHtml(c);
   const fresh = document.querySelector(`.sv-card[data-id="${c.id}"]`);
   if (fresh) bindDetails(fresh);
@@ -1276,6 +1288,7 @@ function paintCard(c) {
 function cardTools(c) {
   if (!state.svEdit) return '';
   return `<span class="sv-tools">
+    <button class="sv-tool" data-act="rename" data-id="${c.id}">✎</button>
     <button class="sv-tool" data-act="up" data-id="${c.id}">↑</button>
     <button class="sv-tool" data-act="down" data-id="${c.id}">↓</button>
     <button class="sv-tool sv-del" data-act="del" data-id="${c.id}">✕</button>
@@ -1315,7 +1328,7 @@ function stopCardHtml(c, d) {
     body = `<div class="sv-deps">${deps.slice(0, 4).map(depRowHtml).join('')}</div>`;
   }
   return `<div class="sv-card" data-id="${c.id}">
-    <div class="sv-head">${badge}<span class="sv-title">${esc(cleanName(c.stopName))}</span><span class="sv-dir">${esc(dirTxt)}</span>${cardTools(c)}</div>
+    <div class="sv-head">${badge}<span class="sv-title">${esc(c.label || cleanName(c.stopName))}</span><span class="sv-dir">${esc(dirTxt)}</span>${cardTools(c)}</div>
     <div class="sv-body" data-act="open-stop" data-id="${c.id}">${body}</div>
     ${d.alerts && d.alerts.length ? `<div class="alerts sv-alerts">${alertsHtml(d.alerts)}</div>` : ''}
   </div>`;
@@ -1323,7 +1336,20 @@ function stopCardHtml(c, d) {
 
 function placeCardHtml(c, d) {
   const open = state.svOpen.has(c.id);
-  const rows = upcomingJourneys(d.journeys || []);
+  const all = upcomingJourneys(d.journeys || []);
+
+  // 按线路组合分组 → 可选路线(快的排前);选中的这会儿没车就先看全部
+  const groups = new Map();
+  for (const j of all) {
+    const sig = routeSig(j);
+    const g = groups.get(sig) || { sig, sample: j, minDur: Infinity };
+    const dur = journeyMinutes(j);
+    if (dur != null) g.minDur = Math.min(g.minDur, dur);
+    groups.set(sig, g);
+  }
+  const sel = c.routeSel && groups.has(c.routeSel) ? c.routeSel : null;
+  const rows = sel ? all.filter((j) => routeSig(j) === sel) : all;
+
   let body;
   if (d.near) {
     body = `<div class="sv-msg">你就在附近</div>`;
@@ -1335,16 +1361,31 @@ function placeCardHtml(c, d) {
     const arr = berlinTime(legArr(j.legs[j.legs.length - 1]));
     const dur = journeyMinutes(j);
     const leave = leaveIn === null ? '' : leaveIn <= 0 ? '现在出门' : leaveIn + ' 分后出门';
+    const options = [...groups.values()].sort((a, b) => a.minDur - b.minDur);
+    const chips =
+      options.length > 1
+        ? `<div class="chip-wrap sv-routes">
+          <button class="chip ${sel ? '' : 'chip-on'}" data-act="route" data-id="${c.id}" data-sig="">全部</button>
+          ${options
+            .map(
+              (o) => `<button class="chip rt-chip ${sel === o.sig ? 'chip-on' : ''}" data-act="route" data-id="${c.id}" data-sig="${esc(o.sig)}">
+              ${sigBadges(o.sample)}<span class="rt-dur">${o.minDur !== Infinity ? o.minDur + '′' : ''}</span></button>`
+            )
+            .join('')}
+        </div>`
+        : '';
+    const note = c.routeSel && !sel ? `<div class="rt-note">你选的 ${esc(c.routeSel.replace(/›/g, ' › '))} 近期没有班次,先显示全部</div>` : '';
     body = `<div class="sv-best" data-act="toggle-place" data-id="${c.id}">
         <span class="rt-badges">${sigBadges(j)}</span>
         <span class="sv-best-mid"><b class="${leaveIn !== null && leaveIn <= 1 ? 'urgent' : ''}">${esc(leave)}</b>
           <small>${esc(arr)} 到${dur != null ? ' · 约 ' + dur + ' 分' : ''}</small></span>
-        <span class="sv-more">${open ? '收起' : '更多 ' + rows.length}</span>
+        <span class="sv-more">${open ? '收起' : '更多 ' + all.length}</span>
       </div>
-      ${open ? `<div class="sv-jn">${rows.map(homeRowHtml).join('')}</div>` : ''}`;
+      ${open ? `${note}${chips}<div class="sv-jn">${rows.map(homeRowHtml).join('')}</div>` : ''}`;
   }
+  const ico = /家|home/i.test(c.label || '') ? '🏠' : '📍';
   return `<div class="sv-card" data-id="${c.id}">
-    <div class="sv-head"><span class="sv-ico">📍</span><span class="sv-title">${esc(c.label)}</span><span class="sv-dir">从当前位置</span>${cardTools(c)}</div>
+    <div class="sv-head"><span class="sv-ico">${ico}</span><span class="sv-title">${esc(c.label)}</span><span class="sv-dir">从当前位置</span>${cardTools(c)}</div>
     <div class="sv-body">${body}</div>
   </div>`;
 }

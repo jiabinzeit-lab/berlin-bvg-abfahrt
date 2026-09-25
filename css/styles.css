@@ -183,6 +183,9 @@ body {
 .sv-best-mid small { color: var(--muted); font-size: 12px; }
 .sv-more { color: var(--accent); font-size: 13px; white-space: nowrap; }
 .sv-jn { border-top: 1px solid var(--line); }
+.sv-routes { padding: 0 12px 10px; }
+.sv-routes .rt-chip { padding: 4px 9px; }
+.sv-body .rt-note:not(:empty) { padding: 0 12px 8px; }
 .sv-jn .rt-item:last-child > summary { border-bottom: none; }
 .sv-empty { padding: 32px 20px; font-size: 14px; }
 .sv-addbox {
