@@ -146,8 +146,26 @@ function updateNav() {
 // ---- 固定路牌三个栏:
 //   home) Board:U Breitenbachplatz 本站发车表(只看指定几路车;282 只看往 Dardanellenweg)
 //   s282) U Schloßstr. 往 Breitenbachplatz 的 282 时刻 + 整条线上车开到哪了
-//   go)   按定位:从当前位置去 U Breitenbachplatz 的公交/地铁方案(按线路组合可选)
-const HOME_PRODUCTS = ['subway', 'bus']; // 只坐公交和地铁
+//   go)   按定位:从当前位置去 U Breitenbachplatz 的公交 / U-Bahn / S-Bahn 方案(按线路组合可选)
+const HOME_PRODUCTS = ['subway', 'suburban', 'bus']; // 公交 + U-Bahn + S-Bahn(不坐 Tram / 区域火车)
+const RAIL_PRODUCTS = ['subway', 'suburban']; // 单独查一遍「只坐 U+S」,补出 U 转 S 这类方案
+
+// 路线更多元:同时查「允许的全部交通方式」和「只坐 U+S」,合并去重。
+// 公交更快时 HAFAS 往往只给公交方案,单独查轨道才能看到 U9›S46›U3 这类换乘。
+async function diverseJourneys(from, to, { products = null, results = 6, src } = {}) {
+  const [main, rail] = await Promise.all([
+    journeys(from, to, { results, products, src }),
+    journeys(from, to, { results, products: RAIL_PRODUCTS, src }).catch(() => []), // 这一路失败不影响主结果
+  ]);
+  const seen = new Set();
+  return [...main, ...rail].filter((j) => {
+    if (!j.legs || !j.legs.length) return false;
+    const k = journeyKey(j);
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}
 const NEAR_M = 400; // 离站这么近就不用规划路线
 
 const onTab = (t) => state.tab === t && !state.currentStop;
@@ -208,7 +226,7 @@ function render282() {
 function renderGo() {
   tabHeader('去 ' + PINNED.name, loadHomeRoutes);
   app.innerHTML = `
-    <div class="tab-sub">从你现在的位置出发 · 只坐公交 / 地铁</div>
+    <div class="tab-sub">从你现在的位置出发 · 公交 / U-Bahn / S-Bahn</div>
     <div id="rt-status" class="pin-status"></div>
     <div id="rt-chips" class="filter-bar rt-chips"></div>
     <div id="rt-note" class="rt-note"></div>
@@ -435,7 +453,7 @@ async function loadHomeRoutes() {
     for (const s of PINNED_SOURCES) {
       try {
         const to = s === 'vbb' ? PINNED.id : { latitude: PINNED.latitude, longitude: PINNED.longitude, address: PINNED.name };
-        list = await journeys(from, to, { results: 8, products: HOME_PRODUCTS, src: s });
+        list = await diverseJourneys(from, to, { results: 6, products: HOME_PRODUCTS, src: s });
         src = s;
         break;
       } catch (e) {
@@ -551,7 +569,7 @@ function paintHomeRoutes() {
 
   const rows = sel ? all.filter((j) => routeSig(j) === sel) : all;
   if (!rows.length) {
-    listEl.innerHTML = emptyState('近期没有只坐公交/地铁去 ' + esc(PINNED.name) + ' 的方案');
+    listEl.innerHTML = emptyState('近期没有坐公交 / U / S 去 ' + esc(PINNED.name) + ' 的方案');
     return;
   }
   listEl.innerHTML = rows.map(homeRowHtml).join('');
@@ -1249,7 +1267,7 @@ async function loadCard(c, force = false) {
         data.near = true;
       } else {
         const me = { latitude: +coords.latitude.toFixed(4), longitude: +coords.longitude.toFixed(4), address: '我的位置' };
-        data.journeys = await journeys(me, c.to, { results: 6 });
+        data.journeys = await diverseJourneys(me, c.to, { results: 6 });
         data.near = false;
       }
       if (!onTab('saved')) return;
